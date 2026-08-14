@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 
 const baseUrl = process.env.APP_URL ?? "http://127.0.0.1:3000";
+const adminPassword = process.env.VISUAL_ADMIN_PASSWORD;
 const outputDir = new URL("../artifacts/visual/", import.meta.url);
 
 const scenarios = [
@@ -27,6 +28,7 @@ try {
     const context = await browser.newContext({
       viewport: device.viewport,
       deviceScaleFactor: 1,
+      reducedMotion: "reduce",
     });
     const page = await context.newPage();
 
@@ -51,6 +53,26 @@ try {
         failures.push(
           `${device.name}/${scenario.name}: HTTP ${response?.status() ?? "?"}`,
         );
+      }
+
+      if (
+        scenario.name === "admin" &&
+        new URL(page.url()).pathname === "/admin/login"
+      ) {
+        if (!adminPassword) {
+          throw new Error(
+            "VISUAL_ADMIN_PASSWORD is required to test the protected admin UI.",
+          );
+        }
+
+        await page
+          .getByLabel("Пароль администратора")
+          .fill(adminPassword);
+        await page
+          .getByRole("button", { name: "Войти в редакцию" })
+          .click();
+        await page.waitForURL(`${baseUrl}/admin`);
+        await page.waitForLoadState("networkidle");
       }
 
       const overflow = await page.evaluate(
@@ -119,6 +141,15 @@ try {
           );
         }
         await categorySearch.fill("");
+
+        await page.getByLabel("Имя").fill("Сквозной тест");
+        await page.getByLabel("Компания").fill("SaleTracker E2E");
+        await page.getByLabel("Рабочий email").fill("e2e@example.ru");
+        await page
+          .getByLabel(
+            "Согласен на обработку данных и получение выбранных материалов.",
+          )
+          .check();
 
         await page
           .getByRole("button", { name: "Получить дайджест" })

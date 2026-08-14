@@ -91,7 +91,7 @@ export function adminSessionCookie(token: string) {
     name: ADMIN_COOKIE,
     value: token,
     httpOnly: true,
-    secure: new URL(env.NEXT_PUBLIC_APP_URL).protocol === "https:",
+    secure: new URL(env.APP_URL).protocol === "https:",
     sameSite: "strict" as const,
     path: "/",
     maxAge: SESSION_TTL_SECONDS,

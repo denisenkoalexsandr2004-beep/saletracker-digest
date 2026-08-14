@@ -13,7 +13,10 @@ const issue = buildDigestIssue({
   targetSize: 10,
   frequency: "twice-weekly",
   since: "2026-07-14T00:00:00+03:00",
-  materials: demoMaterials,
+  materials: demoMaterials.map((material, index) => ({
+    ...material,
+    sourcePublishedAt: `2026-07-${String(23 - (index % 2)).padStart(2, "0")}T09:00:00+03:00`,
+  })),
   events: demoEvents,
   now: "2026-07-24T12:00:00+03:00",
 });

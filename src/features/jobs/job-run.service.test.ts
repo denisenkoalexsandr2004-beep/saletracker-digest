@@ -23,4 +23,30 @@ describe("runIdempotentJob", () => {
     expect(repeated.executed).toBe(false);
     expect(calls).toBe(1);
   });
+
+  it("повторяет временный сбой три раза и затем переводит job в dead-letter", async () => {
+    const repository = new InMemoryJobRunRepository();
+    let attempts = 0;
+    const input = {
+      kind: "digest-dispatch",
+      idempotencyKey: "digest-dispatch:2026-08-13",
+      payload: {},
+      repository,
+      execute: async () => {
+        attempts += 1;
+        throw new Error("Temporary upstream failure");
+      },
+      now: () => "2026-08-13T09:00:00.000Z",
+    };
+
+    await expect(runIdempotentJob(input)).rejects.toThrow();
+    await expect(runIdempotentJob(input)).rejects.toThrow();
+    await expect(runIdempotentJob(input)).rejects.toThrow();
+    const deadLetter = await runIdempotentJob(input);
+
+    expect(attempts).toBe(3);
+    expect(deadLetter.executed).toBe(false);
+    expect(deadLetter.run.status).toBe("dead-letter");
+    expect(deadLetter.run.attemptCount).toBe(3);
+  });
 });

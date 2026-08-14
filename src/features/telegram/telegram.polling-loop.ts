@@ -1,7 +1,8 @@
 import { pollTelegramUpdatesOnce } from "@/features/telegram/telegram.polling";
 import { getTelegramClient } from "@/features/telegram/telegram.runtime";
 
-const POLLING_INTERVAL_MS = 2_500;
+const LONG_POLL_TIMEOUT_SECONDS = 25;
+const POLLING_RETRY_DELAY_MS = 1_000;
 
 interface TelegramPollingLoopState {
   running: boolean;
@@ -16,8 +17,8 @@ declare global {
     | undefined;
 }
 
-function scheduleNext(run: () => Promise<void>) {
-  const timer = setTimeout(() => void run(), POLLING_INTERVAL_MS);
+function scheduleNext(run: () => Promise<void>, delayMs: number) {
+  const timer = setTimeout(() => void run(), delayMs);
   timer.unref();
 }
 
@@ -51,8 +52,12 @@ export function startTelegramPollingLoop(): void {
   };
 
   const run = async () => {
+    let nextDelayMs = 0;
+
     try {
-      const result = await pollTelegramUpdatesOnce(client);
+      const result = await pollTelegramUpdatesOnce(client, {
+        timeoutSeconds: LONG_POLL_TIMEOUT_SECONDS,
+      });
       globalThis.saleTrackerTelegramPollingLoopState = {
         running: result.mode === "polling",
         mode: result.mode,
@@ -63,6 +68,7 @@ export function startTelegramPollingLoop(): void {
         return;
       }
     } catch (error) {
+      nextDelayMs = POLLING_RETRY_DELAY_MS;
       globalThis.saleTrackerTelegramPollingLoopState = {
         running: true,
         mode: "polling",
@@ -71,8 +77,8 @@ export function startTelegramPollingLoop(): void {
       };
     }
 
-    scheduleNext(run);
+    scheduleNext(run, nextDelayMs);
   };
 
-  scheduleNext(run);
+  void run();
 }

@@ -159,6 +159,14 @@ async function handleStart(
     return;
   }
 
+  if (delivery.status === "sending") {
+    await dependencies.gateway.sendMessage(
+      message.chat.id,
+      "Telegram уже подключён. Персональный выпуск отправляется и появится в чате через несколько секунд.",
+    );
+    return;
+  }
+
   const dispatched = await dispatchDigestDelivery(delivery.id, {
     gateway: dependencies.gateway,
     appUrl: dependencies.appUrl,
@@ -179,73 +187,77 @@ export async function handleTelegramUpdate(
   update: TelegramUpdate,
   dependencies: TelegramUpdateDependencies,
 ): Promise<"processed" | "duplicate" | "ignored"> {
-  if (await dependencies.updates.has(update.update_id)) {
+  if (!(await dependencies.updates.claim(update.update_id))) {
     return "duplicate";
   }
 
-  const message = update.message;
+  try {
+    const message = update.message;
 
-  if (!message?.text) {
-    await dependencies.updates.markProcessed(update.update_id);
-    return "ignored";
-  }
+    if (!message?.text) {
+      return "ignored";
+    }
 
-  const parsed = parseCommand(message.text);
+    const parsed = parseCommand(message.text);
 
-  if (parsed.command === "start") {
-    await handleStart(update, parsed.argument, dependencies);
-  } else if (parsed.command === "help" || parsed.command === "unknown") {
-    await dependencies.gateway.sendMessage(
-      message.chat.id,
-      [
-        "<b>Дайджест Платформы Сейл Трекер</b>",
-        "",
-        "/digest — проверить статус выпуска",
-        "/settings — показать настройки",
-        "/help — помощь",
-      ].join("\n"),
-      { parseMode: "HTML" },
-    );
-  } else {
-    const subscription = await dependencies.subscriptions.findByTelegramChatId(
-      message.chat.id,
-    );
-
-    if (!subscription) {
+    if (parsed.command === "start") {
+      await handleStart(update, parsed.argument, dependencies);
+    } else if (parsed.command === "help" || parsed.command === "unknown") {
       await dependencies.gateway.sendMessage(
         message.chat.id,
-        "Сначала подключите подписку по персональной ссылке с сайта SaleTracker.",
-      );
-    } else if (parsed.command === "settings") {
-      await dependencies.gateway.sendMessage(
-        message.chat.id,
-        settingsMessage(subscription),
+        [
+          "<b>Дайджест Платформы Сейл Трекер</b>",
+          "",
+          "/digest — проверить статус выпуска",
+          "/settings — показать настройки",
+          "/help — помощь",
+        ].join("\n"),
         { parseMode: "HTML" },
       );
     } else {
-      const delivery = await dependencies.deliveries.findBySubscriptionId(
-        subscription.id,
-      );
-      const messageByStatus = {
-        "waiting-telegram":
-          "Telegram подключён. Выпуск готовится к редакционной проверке.",
-        ready:
-          "Ваш персональный выпуск подготовлен и ожидает отправки редактором.",
-        sending: "Выпуск отправляется. Он появится в чате через несколько секунд.",
-        sent: "Последний персональный выпуск уже отправлен в этот чат.",
-        failed:
-          "При отправке возникла техническая ошибка. Редакция уже может повторить отправку.",
-      } as const;
-
-      await dependencies.gateway.sendMessage(
+      const subscription = await dependencies.subscriptions.findByTelegramChatId(
         message.chat.id,
-        delivery
-          ? messageByStatus[delivery.status]
-          : "Ваш персональный выпуск находится в редакционной очереди.",
       );
-    }
-  }
 
-  await dependencies.updates.markProcessed(update.update_id);
-  return "processed";
+      if (!subscription) {
+        await dependencies.gateway.sendMessage(
+          message.chat.id,
+          "Сначала подключите подписку по персональной ссылке с сайта SaleTracker.",
+        );
+      } else if (parsed.command === "settings") {
+        await dependencies.gateway.sendMessage(
+          message.chat.id,
+          settingsMessage(subscription),
+          { parseMode: "HTML" },
+        );
+      } else {
+        const delivery = await dependencies.deliveries.findBySubscriptionId(
+          subscription.id,
+        );
+        const messageByStatus = {
+          "waiting-telegram":
+            "Telegram подключён. Выпуск готовится к редакционной проверке.",
+          ready:
+            "Ваш персональный выпуск подготовлен и ожидает отправки редактором.",
+          sending:
+            "Выпуск отправляется. Он появится в чате через несколько секунд.",
+          sent: "Последний персональный выпуск уже отправлен в этот чат.",
+          failed:
+            "При отправке возникла техническая ошибка. Редакция уже может повторить отправку.",
+        } as const;
+
+        await dependencies.gateway.sendMessage(
+          message.chat.id,
+          delivery
+            ? messageByStatus[delivery.status]
+            : "Ваш персональный выпуск находится в редакционной очереди.",
+        );
+      }
+    }
+
+    return "processed";
+  } catch (error) {
+    await dependencies.updates.release(update.update_id);
+    throw error;
+  }
 }

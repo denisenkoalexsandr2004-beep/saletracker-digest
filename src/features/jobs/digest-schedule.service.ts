@@ -15,11 +15,15 @@ import type { TelegramGateway } from "@/features/telegram/telegram.types";
 import type { CzsEvent, Material } from "@/features/digests/digest.types";
 import { demoEvents } from "@/shared/demo-data";
 
-interface MoscowSlot {
+export interface MoscowSlot {
   date: string;
   day: number;
   hour: number;
   weekday: "Mon" | "Tue" | "Wed" | "Thu" | "Fri" | "Sat" | "Sun";
+}
+
+export function isDigestDispatchWindow(slot: MoscowSlot): boolean {
+  return slot.hour >= 12 && slot.hour < 15;
 }
 
 interface ScheduledDigestDependencies {
@@ -29,6 +33,23 @@ interface ScheduledDigestDependencies {
   deliveries?: DigestDeliveryRepository;
   materials?: Material[];
   events?: CzsEvent[];
+}
+
+export interface ScheduledDigestResult extends Record<string, unknown> {
+  slot: string;
+  cutoff: string;
+  due: number;
+  sent: number;
+  alreadySent: number;
+  empty: number;
+  failed: Array<{ subscriptionId: string; error: string }>;
+}
+
+export class ScheduledDigestDispatchError extends Error {
+  constructor(public readonly summary: ScheduledDigestResult) {
+    super(`Не отправлено выпусков: ${summary.failed.length}.`);
+    this.name = "ScheduledDigestDispatchError";
+  }
 }
 
 export function getMoscowSlot(value: string): MoscowSlot {
@@ -71,11 +92,16 @@ export function isDigestDue(
   return slot.weekday === "Mon" && slot.day <= 7;
 }
 
+export function getDigestCutoff(slot: MoscowSlot): string {
+  return `${slot.date}T08:30:00.000Z`;
+}
+
 export async function runScheduledDigestDispatch(
   now: string,
   dependencies: ScheduledDigestDependencies,
-): Promise<Record<string, unknown>> {
+): Promise<ScheduledDigestResult> {
   const slot = getMoscowSlot(now);
+  const cutoff = getDigestCutoff(slot);
   const subscriptions =
     dependencies.subscriptions ?? getSubscriptionRepository();
   const deliveries =
@@ -98,7 +124,14 @@ export async function runScheduledDigestDispatch(
           now,
           since: subscription.lastDigestAt ?? subscription.createdAt,
           issueKey: `digest:${subscription.id}:${slot.date}`,
-          materials: dependencies.materials ?? [],
+          materials: (dependencies.materials ?? []).filter(
+            (material) => {
+              const approvedAt = Date.parse(material.approvedAt ?? "");
+              return (
+                Number.isFinite(approvedAt) && approvedAt <= Date.parse(cutoff)
+              );
+            },
+          ),
           events: dependencies.events ?? demoEvents,
         },
         deliveries,
@@ -130,12 +163,19 @@ export async function runScheduledDigestDispatch(
     }
   }
 
-  return {
+  const summary: ScheduledDigestResult = {
     slot: slot.date,
+    cutoff,
     due: due.length,
     sent,
     alreadySent,
     empty,
     failed,
   };
+
+  if (failed.length) {
+    throw new ScheduledDigestDispatchError(summary);
+  }
+
+  return summary;
 }

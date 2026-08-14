@@ -51,11 +51,11 @@ export function SubscriptionBuilder({
     useState<DigestFrequency>("weekly");
   const [targetSize, setTargetSize] = useState<DigestTargetSize>(10);
   const [fields, setFields] = useState<FormFields>({
-    name: "Александр",
-    company: "Тестовая компания",
-    email: "demo@example.ru",
+    name: "",
+    company: "",
+    email: "",
   });
-  const [consent, setConsent] = useState(true);
+  const [consent, setConsent] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [success, setSuccess] = useState<SuccessState | null>(null);
@@ -429,7 +429,11 @@ export function SubscriptionBuilder({
         <label className="consent">
           <input
             checked={consent}
-            onChange={(event) => setConsent(event.target.checked)}
+            onChange={(event) => {
+              setConsent(event.target.checked);
+              setFieldErrors((current) => ({ ...current, consent: "" }));
+              setSuccess(null);
+            }}
             type="checkbox"
           />
           <span>

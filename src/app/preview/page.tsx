@@ -45,7 +45,7 @@ export default function PreviewPage() {
         </header>
 
         <div className="preview-layout">
-          <DigestPreview appUrl={env.NEXT_PUBLIC_APP_URL} issue={previewIssue} />
+          <DigestPreview appUrl={env.APP_URL} issue={previewIssue} />
 
           <aside className="preview-panel">
             <p className="mono-label">Контроль выпуска</p>

@@ -16,6 +16,11 @@ import type {
 } from "@/features/telegram/telegram.types";
 import { demoEvents, demoMaterials } from "@/shared/demo-data";
 
+const freshDemoMaterials = demoMaterials.map((material, index) => ({
+  ...material,
+  sourcePublishedAt: `2026-07-${String(23 - (index % 2)).padStart(2, "0")}T09:00:00+03:00`,
+}));
+
 class FakeGateway implements TelegramGateway {
   readonly messages: {
     chatId: number;
@@ -35,6 +40,21 @@ class FakeGateway implements TelegramGateway {
     }
 
     this.messages.push({ chatId, text, options });
+  }
+}
+
+class FlakyGateway implements TelegramGateway {
+  readonly messages: string[] = [];
+  private calls = 0;
+
+  async sendMessage(_chatId: number, text: string) {
+    this.calls += 1;
+
+    if (this.calls === 2) {
+      throw new Error("Temporary Telegram failure");
+    }
+
+    this.messages.push(text);
   }
 }
 
@@ -71,7 +91,7 @@ async function buildFixture(connected = true) {
     subscription,
     {
       now: "2026-07-24T12:00:00+03:00",
-      materials: demoMaterials,
+      materials: freshDemoMaterials,
       events: demoEvents,
     },
     deliveries,
@@ -104,6 +124,69 @@ describe("digest delivery", () => {
     );
 
     expect(ready.status).toBe("ready");
+  });
+
+  it("не отправляет устаревшие демоматериалы как свежий выпуск", async () => {
+    const subscriptions = new InMemorySubscriptionRepository();
+    const deliveries = new InMemoryDigestDeliveryRepository();
+    const subscription = subscriptions.create(buildSubscription(false));
+    const delivery = await ensureDigestDelivery(
+      subscription,
+      {
+        now: "2026-08-13T12:00:00+03:00",
+        materials: demoMaterials,
+        events: demoEvents,
+      },
+      deliveries,
+    );
+
+    expect(delivery.issue.items).toHaveLength(0);
+  });
+
+  it("пересобирает первый выпуск на момент подключения Telegram", async () => {
+    const subscriptions = new InMemorySubscriptionRepository();
+    const deliveries = new InMemoryDigestDeliveryRepository();
+    const subscription = subscriptions.create(buildSubscription(false));
+    const initiallyFresh = {
+      ...freshDemoMaterials[0],
+      id: "initially-fresh",
+      storyId: "initially-fresh-story",
+      approvedAt: "2026-07-23T09:00:00+03:00",
+      sourcePublishedAt: "2026-07-23T08:00:00+03:00",
+    };
+    await ensureDigestDelivery(
+      subscription,
+      {
+        now: "2026-07-24T12:00:00+03:00",
+        materials: [initiallyFresh],
+      },
+      deliveries,
+    );
+    const connected = {
+      ...subscription,
+      telegram: {
+        chatId: 9001,
+        userId: 7001,
+        firstName: "Александр",
+        connectedAt: "2026-08-14T12:00:00+03:00",
+      },
+    };
+    const current = {
+      ...freshDemoMaterials[0],
+      id: "current",
+      storyId: "current-story",
+      approvedAt: "2026-08-14T08:00:00+03:00",
+      sourcePublishedAt: "2026-08-14T07:30:00+03:00",
+    };
+
+    const ready = await markDigestDeliveryReady(
+      connected,
+      "2026-08-14T12:00:00+03:00",
+      { materials: [initiallyFresh, current] },
+      deliveries,
+    );
+
+    expect(ready.issue.items.map((item) => item.id)).toEqual(["current"]);
   });
 
   it("отправляет приветствие, выпуск и фиксирует результат", async () => {
@@ -172,6 +255,78 @@ describe("digest delivery", () => {
     expect(
       fixture.deliveries.findById(fixture.delivery.id)?.status,
     ).toBe("failed");
+    expect(
+      fixture.deliveries.findById(fixture.delivery.id)?.attemptCount,
+    ).toBe(1);
+  });
+
+  it("при повторе не дублирует уже отправленную часть выпуска", async () => {
+    const fixture = await buildFixture();
+    const gateway = new FlakyGateway();
+    const dependencies = {
+      gateway,
+      appUrl: "https://digest.example.ru",
+      now: () => "2026-07-24T12:01:00+03:00",
+      subscriptions: fixture.subscriptions,
+      deliveries: fixture.deliveries,
+    };
+
+    await expect(
+      dispatchDigestDelivery(fixture.delivery.id, dependencies),
+    ).rejects.toThrow("Temporary Telegram failure");
+    await dispatchDigestDelivery(fixture.delivery.id, dependencies);
+
+    expect(
+      gateway.messages.filter((message) =>
+        message.includes("Редакция Платформы Сейл Трекер"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      fixture.deliveries.findById(fixture.delivery.id)?.attemptCount,
+    ).toBe(2);
+    expect(
+      fixture.deliveries.findById(fixture.delivery.id)?.status,
+    ).toBe("sent");
+  });
+
+  it("возвращает зависшую отправку в работу после истечения lease", async () => {
+    const fixture = await buildFixture();
+    const first = fixture.deliveries.claimForSending(
+      fixture.delivery.id,
+      "2026-07-24T12:01:00+03:00",
+    );
+    const concurrent = fixture.deliveries.claimForSending(
+      fixture.delivery.id,
+      "2026-07-24T12:05:00+03:00",
+    );
+    const reclaimed = fixture.deliveries.claimForSending(
+      fixture.delivery.id,
+      "2026-07-24T12:17:00+03:00",
+    );
+
+    expect(first.status).toBe("claimed");
+    expect(concurrent.status).toBe("already-sending");
+    expect(reclaimed.status).toBe("claimed");
+    expect(
+      reclaimed.status === "claimed"
+        ? reclaimed.delivery.attemptCount
+        : null,
+    ).toBe(2);
+  });
+
+  it("не переводит уже отправляемый выпуск обратно в ready", async () => {
+    const fixture = await buildFixture();
+    fixture.deliveries.claimForSending(
+      fixture.delivery.id,
+      "2026-07-24T12:01:00+03:00",
+    );
+
+    const unchanged = fixture.deliveries.markReadyBySubscriptionId(
+      fixture.subscription.id,
+      "2026-07-24T12:02:00+03:00",
+    );
+
+    expect(unchanged?.status).toBe("sending");
   });
 
   it("не отправляет выпуск до подключения Telegram", async () => {

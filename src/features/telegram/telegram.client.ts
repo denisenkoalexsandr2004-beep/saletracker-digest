@@ -23,6 +23,10 @@ interface TelegramFailure {
 type TelegramResponse<T> = TelegramSuccess<T> | TelegramFailure;
 
 type Fetch = typeof fetch;
+type Wait = (milliseconds: number) => Promise<void>;
+
+const defaultWait: Wait = (milliseconds) =>
+  new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 export class TelegramApiError extends Error {
   constructor(
@@ -40,36 +44,67 @@ export class TelegramClient implements TelegramGateway {
   constructor(
     private readonly token: string,
     private readonly fetchImplementation: Fetch = fetch,
+    private readonly wait: Wait = defaultWait,
   ) {}
 
   private async call<T>(
     method: string,
     payload: Record<string, unknown> = {},
+    requestTimeoutMs = 10_000,
   ): Promise<T> {
-    const response = await this.fetchImplementation(
-      `https://api.telegram.org/bot${this.token}/${method}`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(10_000),
-      },
-    );
-    const body = (await response.json()) as TelegramResponse<T>;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      let response: Response;
 
-    if (!response.ok || !body.ok) {
+      try {
+        response = await this.fetchImplementation(
+          `https://api.telegram.org/bot${this.token}/${method}`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(payload),
+            signal: AbortSignal.timeout(requestTimeoutMs),
+          },
+        );
+      } catch (error) {
+        if (attempt === 2) {
+          throw error;
+        }
+
+        await this.wait(250 * 2 ** attempt);
+        continue;
+      }
+
+      const body = (await response.json()) as TelegramResponse<T>;
+
+      if (response.ok && body.ok) {
+        return body.result;
+      }
+
       const failure = body as TelegramFailure;
-      throw new TelegramApiError(
+      const error = new TelegramApiError(
         method,
         failure.error_code || response.status,
         failure.description || "Telegram returned an invalid response",
         failure.parameters?.retry_after,
       );
+      const retryable = error.status === 429 || error.status >= 500;
+
+      if (!retryable || attempt === 2) {
+        throw error;
+      }
+
+      await this.wait(
+        Math.min(error.retryAfter ? error.retryAfter * 1_000 : 250 * 2 ** attempt, 5_000),
+      );
     }
 
-    return body.result;
+    throw new TelegramApiError(
+      method,
+      500,
+      "Telegram retry budget was exhausted",
+    );
   }
 
   async getMe(): Promise<TelegramBotIdentity> {
@@ -115,11 +150,18 @@ export class TelegramClient implements TelegramGateway {
     });
   }
 
-  async getUpdates(offset?: number): Promise<TelegramUpdate[]> {
-    return this.call<TelegramUpdate[]>("getUpdates", {
-      offset,
-      timeout: 0,
-      allowed_updates: ["message"],
-    });
+  async getUpdates(
+    offset?: number,
+    timeoutSeconds = 0,
+  ): Promise<TelegramUpdate[]> {
+    return this.call<TelegramUpdate[]>(
+      "getUpdates",
+      {
+        offset,
+        timeout: timeoutSeconds,
+        allowed_updates: ["message"],
+      },
+      Math.max(10_000, (timeoutSeconds + 5) * 1_000),
+    );
   }
 }

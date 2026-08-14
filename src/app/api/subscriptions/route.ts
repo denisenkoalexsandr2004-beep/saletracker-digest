@@ -18,7 +18,7 @@ export async function POST(request: Request) {
     }
 
     const result = await createSubscription(parsed.data, {
-      appUrl: env.NEXT_PUBLIC_APP_URL,
+      appUrl: env.APP_URL,
       telegramBotUsername: env.TELEGRAM_BOT_TOKEN
         ? env.TELEGRAM_BOT_USERNAME
         : undefined,
