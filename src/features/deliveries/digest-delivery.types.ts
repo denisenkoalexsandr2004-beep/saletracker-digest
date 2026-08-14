@@ -14,6 +14,19 @@ export const digestDeliveryStatuses = [
 
 export type DigestDeliveryStatus = (typeof digestDeliveryStatuses)[number];
 
+export type DeliveryMessageStatus = "pending" | "sent" | "failed";
+
+export interface DeliveryMessageCheckpoint {
+  id: string;
+  deliveryId: string;
+  sequence: number;
+  status: DeliveryMessageStatus;
+  sentAt?: string;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface DigestDeliveryRecord {
   id: string;
   subscriptionId: string;

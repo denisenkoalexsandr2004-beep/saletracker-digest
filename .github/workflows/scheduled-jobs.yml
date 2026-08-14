@@ -1,0 +1,60 @@
+name: SaleTracker scheduled jobs
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+    - cron: "*/10 9-11 * * *"
+  workflow_dispatch:
+    inputs:
+      job:
+        description: Job to run
+        required: true
+        default: both
+        type: choice
+        options:
+          - both
+          - news-ingestion
+          - digest-dispatch
+
+concurrency:
+  group: saletracker-scheduled-jobs
+  cancel-in-progress: false
+
+jobs:
+  news-ingestion:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      (inputs.job == 'both' || inputs.job == 'news-ingestion') ||
+      github.event_name == 'schedule' && github.event.schedule == '17 * * * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Collect fresh news
+        env:
+          SALETRACKER_APP_URL: ${{ secrets.SALETRACKER_APP_URL }}
+          SALETRACKER_CRON_SECRET: ${{ secrets.SALETRACKER_CRON_SECRET }}
+        run: >-
+          curl --fail-with-body --silent --show-error
+          --retry 2 --retry-all-errors --max-time 120
+          --request POST
+          --header "Authorization: Bearer ${SALETRACKER_CRON_SECRET}"
+          "${SALETRACKER_APP_URL%/}/api/jobs/news-ingestion"
+
+  digest-dispatch:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      (inputs.job == 'both' || inputs.job == 'digest-dispatch') ||
+      github.event_name == 'schedule' && github.event.schedule == '*/10 9-11 * * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch due digests
+        env:
+          SALETRACKER_APP_URL: ${{ secrets.SALETRACKER_APP_URL }}
+          SALETRACKER_CRON_SECRET: ${{ secrets.SALETRACKER_CRON_SECRET }}
+        run: >-
+          curl --fail-with-body --silent --show-error
+          --retry 2 --retry-all-errors --max-time 120
+          --request POST
+          --header "Authorization: Bearer ${SALETRACKER_CRON_SECRET}"
+          "${SALETRACKER_APP_URL%/}/api/jobs/digest-dispatch"

@@ -60,4 +60,19 @@ describe("candidate quality gate", () => {
 
     expect(result.reasons).toContain("published-at-outside-window");
   });
+
+  it("отклоняет небезопасную HTTP-ссылку даже с разрешённого домена", () => {
+    const result = checkCandidateQuality(
+      {
+        ...validCandidate,
+        sourceUrl: "http://www.retail.ru/news/test-article/",
+      },
+      newsSourceRegistry,
+      "2026-08-12T00:00:00.000Z",
+      "2026-08-13T09:00:00.000Z",
+    );
+
+    expect(result.accepted).toBe(false);
+    expect(result.reasons).toContain("insecure-source-url");
+  });
 });

@@ -219,7 +219,27 @@ export class PostgresSubscriptionRepository
           .limit(1);
 
         if (chatAccount) {
-          return { status: "conflict" } as const;
+          if (chatAccount.userId !== identity.userId) {
+            return { status: "conflict" } as const;
+          }
+
+          const [reboundAccount] = await tx
+            .update(telegramAccounts)
+            .set({
+              subscriptionId: row.id,
+              username: identity.username ?? null,
+              firstName: identity.firstName,
+              connectedAt,
+              updatedAt: connectedAt,
+            })
+            .where(eq(telegramAccounts.chatId, identity.chatId))
+            .returning();
+          const subscription = await this.hydrate(
+            row,
+            tx,
+            reboundAccount,
+          );
+          return { status: "connected", subscription } as const;
         }
 
         const account: TelegramAccountRow = {
@@ -370,7 +390,16 @@ export class InMemorySubscriptionRepository
       existingSubscriptionId &&
       existingSubscriptionId !== subscription.id
     ) {
-      return { status: "conflict" };
+      const existingSubscription = this.byId.get(existingSubscriptionId);
+
+      if (existingSubscription?.telegram?.userId !== identity.userId) {
+        return { status: "conflict" };
+      }
+
+      this.byId.set(existingSubscriptionId, {
+        ...existingSubscription,
+        telegram: undefined,
+      });
     }
 
     const connected: SubscriptionRecord = {

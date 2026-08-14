@@ -5,8 +5,8 @@
 - HTTPS hosting capable of running Next.js server routes. GitHub Pages alone is
   not sufficient.
 - PostgreSQL 15+ (Supabase, Neon or another managed PostgreSQL provider).
-- An HTTP scheduler such as Trigger.dev, Supabase Cron or the hosting provider's
-  cron service.
+- An HTTP scheduler. The repository includes a GitHub Actions scheduler; the
+  hosting provider's cron service may be used instead.
 - Telegram Bot API credentials and an OpenAI API key.
 
 ## 2. Environment
@@ -14,7 +14,7 @@
 Set all values from `.env.example`. Production readiness requires:
 
 ```dotenv
-NEXT_PUBLIC_APP_URL=https://your-domain.example
+APP_URL=https://your-domain.example
 DATABASE_URL=postgresql://...
 DB_POOL_SIZE=5
 ADMIN_PASSWORD=use-a-long-unique-password
@@ -26,6 +26,8 @@ TELEGRAM_WEBHOOK_SECRET=...
 TELEGRAM_ADMIN_SECRET=...
 OPENAI_API_KEY=...
 OPENAI_NEWS_MODEL=gpt-5.6-sol
+NEWS_INGESTION_MAX_AGE_MINUTES=150
+NEWS_APPROVED_SOURCE_MAX_AGE_HOURS=48
 ```
 
 Never prefix private values with `NEXT_PUBLIC_`.
@@ -59,21 +61,34 @@ public form.
 
 ## 5. Scheduler
 
-Send an HTTP POST and the header
+The included `.github/workflows/scheduled-jobs.yml` requires two GitHub Actions
+repository secrets:
+
+```text
+SALETRACKER_APP_URL=https://your-domain.example
+SALETRACKER_CRON_SECRET=the-same-value-as-CRON_SECRET
+```
+
+It calls news ingestion hourly and retries digest dispatch every ten minutes
+during the protected delivery window. Alternatively, configure another
+scheduler to send an HTTP POST and the header
 `Authorization: Bearer <CRON_SECRET>`:
 
 - `/api/jobs/news-ingestion` — once per hour;
-- `/api/jobs/digest-dispatch` — every day at 12:00 Europe/Moscow
-  (09:00 UTC for a UTC-only scheduler).
+- `/api/jobs/digest-dispatch` — every ten minutes from 12:00 through 14:59
+  Europe/Moscow (09:00–11:59 UTC).
 
 The digest job itself applies daily, Monday/Thursday, weekly Monday and first
-Monday-of-month rules. Calling the same slot again is safe.
+Monday-of-month rules. Calling the same slot again is safe and does not create
+duplicate deliveries.
 
 ## 6. Readiness
 
 - `/api/health` is a liveness check and always describes the current mode.
-- `/api/ready` returns `200` only when PostgreSQL and admin authentication are
-  configured; otherwise it returns `503` with a failed check.
+- `/api/ready` returns `200` only when PostgreSQL, dedicated admin auth, HTTPS,
+  Telegram, scheduler and AI are configured and both the last ingestion and
+  newest approved source are within their configured freshness limits.
+  Otherwise it returns `503` and identifies the failed or stale check.
 
 Before launch run:
 

@@ -67,7 +67,7 @@ export async function POST(request: Request, { params }: DispatchRouteProps) {
   try {
     const result = await dispatchDigestDelivery(deliveryId, {
       gateway: client,
-      appUrl: env.NEXT_PUBLIC_APP_URL,
+      appUrl: env.APP_URL,
       now: () => new Date().toISOString(),
     });
     const subscription = await getSubscriptionRepository().findById(

@@ -42,7 +42,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const appUrl = new URL(env.NEXT_PUBLIC_APP_URL);
+  const appUrl = new URL(env.APP_URL);
 
   try {
     const bot = await client.getMe();
@@ -79,7 +79,7 @@ export async function POST(request: Request) {
 
     const webhookUrl = new URL(
       "/api/telegram/webhook",
-      env.NEXT_PUBLIC_APP_URL,
+      env.APP_URL,
     ).toString();
 
     await client.setWebhook(webhookUrl, env.TELEGRAM_WEBHOOK_SECRET);

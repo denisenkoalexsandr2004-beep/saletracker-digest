@@ -3,7 +3,9 @@ import { NextResponse } from "next/server";
 import { requireCronRequest } from "@/features/jobs/cron-auth";
 import {
   getMoscowSlot,
+  isDigestDispatchWindow,
   runScheduledDigestDispatch,
+  ScheduledDigestDispatchError,
 } from "@/features/jobs/digest-schedule.service";
 import { runIdempotentJob } from "@/features/jobs/job-run.service";
 import { getMaterialRepository } from "@/features/materials/material.repository";
@@ -48,26 +50,49 @@ export async function POST(request: Request) {
   const now = new Date().toISOString();
   const slot = getMoscowSlot(now);
 
-  if (slot.hour !== 12) {
+  if (!isDigestDispatchWindow(slot)) {
     return NextResponse.json(
       {
-        data: { skipped: true, reason: "outside-dispatch-hour", slot },
+        data: { skipped: true, reason: "outside-dispatch-window", slot },
       },
       { status: 202 },
     );
   }
 
-  const result = await runIdempotentJob({
-    kind: "digest-dispatch",
-    idempotencyKey: `digest-dispatch:${slot.date}`,
-    payload: { slot: slot.date, timezone: "Europe/Moscow" },
-    execute: async () =>
-      runScheduledDigestDispatch(now, {
-        gateway: client,
-        appUrl: env.NEXT_PUBLIC_APP_URL,
-        materials: await getMaterialRepository().listApproved(),
-      }),
-  });
+  try {
+    const result = await runIdempotentJob({
+      kind: "digest-dispatch",
+      idempotencyKey: `digest-dispatch:${slot.date}`,
+      payload: { slot: slot.date, timezone: "Europe/Moscow" },
+      execute: async () =>
+        runScheduledDigestDispatch(now, {
+          gateway: client,
+          appUrl: env.APP_URL,
+          materials: await getMaterialRepository().listApproved(),
+        }),
+    });
 
-  return NextResponse.json({ data: result });
+    return NextResponse.json({ data: result });
+  } catch (error) {
+    if (error instanceof ScheduledDigestDispatchError) {
+      return NextResponse.json(
+        {
+          title: "DISPATCH_PARTIAL_FAILURE",
+          status: 502,
+          detail: error.message,
+          data: error.summary,
+        },
+        { status: 502 },
+      );
+    }
+
+    return NextResponse.json(
+      {
+        title: "INTERNAL_ERROR",
+        status: 500,
+        detail: "Не удалось выполнить плановую рассылку.",
+      },
+      { status: 500 },
+    );
+  }
 }

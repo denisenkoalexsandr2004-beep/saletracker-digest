@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 const envSchema = z.object({
-  NEXT_PUBLIC_APP_URL: z.url().default("http://localhost:3000"),
+  APP_URL: z.url().default("http://localhost:3000"),
   TELEGRAM_BOT_USERNAME: z
     .string()
     .trim()
@@ -21,27 +21,55 @@ const envSchema = z.object({
   TELEGRAM_ADMIN_SECRET: z.string().trim().min(24).optional(),
   DATABASE_URL: z.string().trim().url().optional(),
   DB_POOL_SIZE: z.coerce.number().int().min(1).max(20).default(5),
-  ADMIN_PASSWORD: z.string().min(12).optional(),
+  ADMIN_PASSWORD: z.string().trim().min(12).optional(),
   SESSION_SECRET: z.string().min(32).optional(),
   CRON_SECRET: z.string().min(24).optional(),
   OPENAI_API_KEY: z.string().trim().min(20).optional(),
   OPENAI_NEWS_MODEL: z.string().trim().min(1).default("gpt-5.6-sol"),
+  NEWS_INGESTION_MAX_AGE_MINUTES: z.coerce
+    .number()
+    .int()
+    .min(30)
+    .max(1_440)
+    .default(150),
+  NEWS_APPROVED_SOURCE_MAX_AGE_HOURS: z.coerce
+    .number()
+    .int()
+    .min(24)
+    .max(720)
+    .default(48),
 });
 
-export const env = envSchema.parse({
-  NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL,
-  TELEGRAM_BOT_USERNAME:
-    process.env.TELEGRAM_BOT_USERNAME?.trim() || undefined,
-  TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN?.trim() || undefined,
-  TELEGRAM_WEBHOOK_SECRET:
-    process.env.TELEGRAM_WEBHOOK_SECRET?.trim() || undefined,
-  TELEGRAM_ADMIN_SECRET:
-    process.env.TELEGRAM_ADMIN_SECRET?.trim() || undefined,
-  DATABASE_URL: process.env.DATABASE_URL?.trim() || undefined,
-  DB_POOL_SIZE: process.env.DB_POOL_SIZE,
-  ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || undefined,
-  SESSION_SECRET: process.env.SESSION_SECRET?.trim() || undefined,
-  CRON_SECRET: process.env.CRON_SECRET?.trim() || undefined,
-  OPENAI_API_KEY: process.env.OPENAI_API_KEY?.trim() || undefined,
-  OPENAI_NEWS_MODEL: process.env.OPENAI_NEWS_MODEL,
-});
+function optionalTrimmed(value: string | undefined): string | undefined {
+  return value?.trim() || undefined;
+}
+
+export function parseEnvironment(
+  source: Readonly<Record<string, string | undefined>>,
+) {
+  return envSchema.parse({
+    APP_URL:
+      optionalTrimmed(source.APP_URL) ||
+      optionalTrimmed(source.NEXT_PUBLIC_APP_URL) ||
+      undefined,
+    TELEGRAM_BOT_USERNAME: optionalTrimmed(source.TELEGRAM_BOT_USERNAME),
+    TELEGRAM_BOT_TOKEN: optionalTrimmed(source.TELEGRAM_BOT_TOKEN),
+    TELEGRAM_WEBHOOK_SECRET: optionalTrimmed(source.TELEGRAM_WEBHOOK_SECRET),
+    TELEGRAM_ADMIN_SECRET: optionalTrimmed(source.TELEGRAM_ADMIN_SECRET),
+    DATABASE_URL: optionalTrimmed(source.DATABASE_URL),
+    DB_POOL_SIZE: optionalTrimmed(source.DB_POOL_SIZE),
+    ADMIN_PASSWORD: optionalTrimmed(source.ADMIN_PASSWORD),
+    SESSION_SECRET: optionalTrimmed(source.SESSION_SECRET),
+    CRON_SECRET: optionalTrimmed(source.CRON_SECRET),
+    OPENAI_API_KEY: optionalTrimmed(source.OPENAI_API_KEY),
+    OPENAI_NEWS_MODEL: optionalTrimmed(source.OPENAI_NEWS_MODEL),
+    NEWS_INGESTION_MAX_AGE_MINUTES: optionalTrimmed(
+      source.NEWS_INGESTION_MAX_AGE_MINUTES,
+    ),
+    NEWS_APPROVED_SOURCE_MAX_AGE_HOURS: optionalTrimmed(
+      source.NEWS_APPROVED_SOURCE_MAX_AGE_HOURS,
+    ),
+  });
+}
+
+export const env = parseEnvironment(process.env);

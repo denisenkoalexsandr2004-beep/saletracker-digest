@@ -51,6 +51,10 @@ export function checkCandidateQuality(
 
   const source = url ? sourceForUrl(url, sources) : undefined;
 
+  if (url && url.protocol !== "https:") {
+    reasons.push("insecure-source-url");
+  }
+
   if (!source) {
     reasons.push("source-outside-registry");
   }

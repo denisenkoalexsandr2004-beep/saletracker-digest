@@ -28,6 +28,20 @@ class FakeGateway implements TelegramGateway {
   }
 }
 
+class FailingOnceGateway implements TelegramGateway {
+  private failed = false;
+  readonly messages: string[] = [];
+
+  async sendMessage(_chatId: number, text: string) {
+    if (!this.failed) {
+      this.failed = true;
+      throw new Error("Temporary Telegram failure");
+    }
+
+    this.messages.push(text);
+  }
+}
+
 function buildSubscription(): SubscriptionRecord {
   return {
     id: "sub_test",
@@ -147,5 +161,20 @@ describe("handleTelegramUpdate", () => {
     );
 
     expect(fixture.gateway.messages[0].text).toContain("Сначала подключите");
+  });
+
+  it("освобождает update claim после ошибки для безопасного повтора", async () => {
+    const fixture = buildFixture();
+    const gateway = new FailingOnceGateway();
+    const dependencies = { ...fixture.dependencies, gateway };
+    const update = buildUpdate(5, "/help");
+
+    await expect(
+      handleTelegramUpdate(update, dependencies),
+    ).rejects.toThrow("Temporary Telegram failure");
+    const repeated = await handleTelegramUpdate(update, dependencies);
+
+    expect(repeated).toBe("processed");
+    expect(gateway.messages).toHaveLength(1);
   });
 });

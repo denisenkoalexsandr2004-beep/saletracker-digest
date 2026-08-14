@@ -60,7 +60,7 @@ export async function POST(request: Request) {
   try {
     const status = await handleTelegramUpdate(
       parsed.data,
-      getTelegramUpdateDependencies(client),
+      await getTelegramUpdateDependencies(client),
     );
 
     return NextResponse.json({ data: { status } });

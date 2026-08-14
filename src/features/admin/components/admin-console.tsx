@@ -593,16 +593,17 @@ export function AdminConsole({
                                 <span>{item.metrics.join(" · ")}</span>
                               </div>
                               <div className="subscriber-article-links">
-                                <Link href={item.articlePath}>Статья ↗</Link>
                                 {item.sourceUrls[0] ? (
                                   <a
                                     href={item.sourceUrls[0]}
                                     rel="noreferrer"
                                     target="_blank"
                                   >
-                                    Первоисточник ↗
+                                    Открыть статью источника ↗
                                   </a>
-                                ) : null}
+                                ) : (
+                                  <span>Источник не указан</span>
+                                )}
                               </div>
                             </li>
                           ))}
@@ -664,7 +665,6 @@ export function AdminConsole({
                         {material.businessImpact}
                       </p>
                       <div className="material-links">
-                        <Link href={material.articlePath}>Статья блога ↗</Link>
                         {material.sourceUrls[0] ? (
                           <a
                             href={material.sourceUrls[0]}
@@ -673,7 +673,9 @@ export function AdminConsole({
                           >
                             Исходная публикация ↗
                           </a>
-                        ) : null}
+                        ) : (
+                          <span>Ссылка появится после проверки источника</span>
+                        )}
                       </div>
                       <div className="material-tags">
                         {material.tags.slice(0, 4).map((tag) => (

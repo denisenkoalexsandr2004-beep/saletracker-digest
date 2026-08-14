@@ -4,18 +4,72 @@ import type {
   DigestSelectionInput,
   Material,
 } from "@/features/digests/digest.types";
-import type { SubscriberRole } from "@/features/subscriptions/subscription.types";
+import type {
+  DigestFrequency,
+  SubscriberRole,
+} from "@/features/subscriptions/subscription.types";
+
+const freshnessWindowDays: Record<DigestFrequency, number> = {
+  daily: 2,
+  "twice-weekly": 5,
+  weekly: 10,
+  monthly: 35,
+};
+
+const broadMarketTags = new Set([
+  "Ритейл",
+  "Федеральные сети",
+  "Региональные сети",
+  "E-commerce",
+  "Маркетплейсы",
+  "Логистика",
+  "Импорт и экспорт",
+  "Закупки и тендеры",
+  "Цены и промо",
+  "Потребительский спрос",
+  "Качество и безопасность",
+  "Маркировка товаров",
+  "Регулирование",
+  "Retail Tech",
+  "Инвестиции и M&A",
+]);
 
 function hasTag(material: Material, tags: Set<string>): boolean {
   return material.tags.some((tag) => tags.has(tag));
 }
 
+function isGeneralMarketMaterial(material: Material): boolean {
+  return (
+    material.scope === "general" ||
+    material.scope === "positive" ||
+    material.tags.some((tag) => broadMarketTags.has(tag))
+  );
+}
+
 function compareMaterials(left: Material, right: Material): number {
+  const sourceDateDifference =
+    Date.parse(right.sourcePublishedAt) - Date.parse(left.sourcePublishedAt);
+
+  if (sourceDateDifference !== 0) {
+    return sourceDateDifference;
+  }
+
   if (right.importance !== left.importance) {
     return right.importance - left.importance;
   }
 
-  return (right.approvedAt ?? "").localeCompare(left.approvedAt ?? "");
+  return (
+    Date.parse(right.approvedAt ?? "") - Date.parse(left.approvedAt ?? "")
+  );
+}
+
+export function getSourceFreshnessStart(
+  frequency: DigestFrequency,
+  now: string,
+): string {
+  const start = new Date(now);
+  start.setUTCDate(start.getUTCDate() - freshnessWindowDays[frequency]);
+  return start.toISOString();
 }
 
 function uniqueByStory(materials: Material[]): Material[] {
@@ -85,12 +139,26 @@ export function findMatchingEvent(
 
 export function buildDigestIssue(input: DigestSelectionInput): DigestIssue {
   const selectedTags = new Set(input.tags);
+  const approvedAfter = Date.parse(input.since);
+  const sourceFreshAfter = Date.parse(
+    getSourceFreshnessStart(input.frequency, input.now),
+  );
+  const latestSourceDate = Date.parse(input.now) + 5 * 60 * 1_000;
   const approved = uniqueByStory(
     input.materials.filter(
-      (material) =>
-        material.status === "approved" &&
-        Boolean(material.approvedAt) &&
-        (material.approvedAt ?? "") > input.since,
+      (material) => {
+        const approvedAt = Date.parse(material.approvedAt ?? "");
+        const sourcePublishedAt = Date.parse(material.sourcePublishedAt);
+
+        return (
+          material.status === "approved" &&
+          Number.isFinite(approvedAt) &&
+          approvedAt > approvedAfter &&
+          Number.isFinite(sourcePublishedAt) &&
+          sourcePublishedAt >= sourceFreshAfter &&
+          sourcePublishedAt <= latestSourceDate
+        );
+      },
     ),
   );
 
@@ -105,17 +173,34 @@ export function buildDigestIssue(input: DigestSelectionInput): DigestIssue {
     .sort(compareMaterials)
     .slice(0, personalizedTarget);
 
-  const selectedIds = new Set(personalized.map((material) => material.id));
+  const personalizedIds = new Set(personalized.map((material) => material.id));
   const general = approved
     .filter(
       (material) =>
-        !selectedIds.has(material.id) &&
-        (material.scope === "general" || material.scope === "positive"),
+        !personalizedIds.has(material.id) &&
+        isGeneralMarketMaterial(material),
     )
     .sort(compareMaterials)
     .slice(0, generalTarget);
 
-  const items = [...personalized, ...general];
+  const selectedIds = new Set([
+    ...personalized.map((material) => material.id),
+    ...general.map((material) => material.id),
+  ]);
+  const remainingCapacity = input.targetSize - personalized.length - general.length;
+  const additionalPersonalized =
+    remainingCapacity > 0
+      ? approved
+          .filter(
+            (material) =>
+              !selectedIds.has(material.id) &&
+              material.scope === "tagged" &&
+              hasTag(material, selectedTags),
+          )
+          .sort(compareMaterials)
+          .slice(0, remainingCapacity)
+      : [];
+  const items = [...personalized, ...additionalPersonalized, ...general];
   const event = findMatchingEvent(
     input.events,
     input.role,
@@ -129,7 +214,7 @@ export function buildDigestIssue(input: DigestSelectionInput): DigestIssue {
     frequency: input.frequency,
     targetSize: input.targetSize,
     items,
-    personalizedCount: personalized.length,
+    personalizedCount: personalized.length + additionalPersonalized.length,
     generalCount: general.length,
     event,
     cta: getEventCta(input.role),

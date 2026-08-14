@@ -6,8 +6,8 @@ import { telegramUpdates } from "@/shared/database/schema";
 type RepositoryResult<T> = T | Promise<T>;
 
 export interface TelegramUpdateRepository {
-  has(updateId: number): RepositoryResult<boolean>;
-  markProcessed(updateId: number): RepositoryResult<void>;
+  claim(updateId: number): RepositoryResult<boolean>;
+  release(updateId: number): RepositoryResult<void>;
 }
 
 export class PostgresTelegramUpdateRepository
@@ -15,20 +15,19 @@ export class PostgresTelegramUpdateRepository
 {
   constructor(private readonly db: Database) {}
 
-  async has(updateId: number): Promise<boolean> {
-    const [row] = await this.db
-      .select({ updateId: telegramUpdates.updateId })
-      .from(telegramUpdates)
-      .where(eq(telegramUpdates.updateId, updateId))
-      .limit(1);
-    return Boolean(row);
-  }
-
-  async markProcessed(updateId: number): Promise<void> {
-    await this.db
+  async claim(updateId: number): Promise<boolean> {
+    const [claimed] = await this.db
       .insert(telegramUpdates)
       .values({ updateId })
-      .onConflictDoNothing({ target: telegramUpdates.updateId });
+      .onConflictDoNothing({ target: telegramUpdates.updateId })
+      .returning({ updateId: telegramUpdates.updateId });
+    return Boolean(claimed);
+  }
+
+  async release(updateId: number): Promise<void> {
+    await this.db
+      .delete(telegramUpdates)
+      .where(eq(telegramUpdates.updateId, updateId));
   }
 }
 
@@ -37,11 +36,11 @@ export class InMemoryTelegramUpdateRepository
 {
   private readonly processed = new Set<number>();
 
-  has(updateId: number): boolean {
-    return this.processed.has(updateId);
-  }
+  claim(updateId: number): boolean {
+    if (this.processed.has(updateId)) {
+      return false;
+    }
 
-  markProcessed(updateId: number): void {
     this.processed.add(updateId);
 
     if (this.processed.size > 10_000) {
@@ -51,6 +50,12 @@ export class InMemoryTelegramUpdateRepository
         this.processed.delete(oldest);
       }
     }
+
+    return true;
+  }
+
+  release(updateId: number): void {
+    this.processed.delete(updateId);
   }
 }
 

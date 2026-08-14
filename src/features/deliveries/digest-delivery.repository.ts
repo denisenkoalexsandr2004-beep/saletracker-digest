@@ -1,13 +1,27 @@
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 
 import type {
   DigestDeliveryRecord,
   DigestDeliveryStatus,
+  DeliveryMessageCheckpoint,
 } from "@/features/deliveries/digest-delivery.types";
 import { getDatabase, type Database } from "@/shared/database/client";
-import { digestDeliveries } from "@/shared/database/schema";
+import {
+  deliveryMessages,
+  digestDeliveries,
+} from "@/shared/database/schema";
 
 type RepositoryResult<T> = T | Promise<T>;
+const DELIVERY_LEASE_MS = 15 * 60 * 1_000;
+
+function isDeliveryLeaseExpired(
+  delivery: DigestDeliveryRecord,
+  claimedAt: string,
+): boolean {
+  return (
+    Date.parse(claimedAt) - Date.parse(delivery.updatedAt) >= DELIVERY_LEASE_MS
+  );
+}
 
 export type ClaimDeliveryResult =
   | { status: "claimed"; delivery: DigestDeliveryRecord }
@@ -44,6 +58,22 @@ export interface DigestDeliveryRepository {
     error: string,
     updatedAt: string,
   ): RepositoryResult<DigestDeliveryRecord | null>;
+  ensureMessageCheckpoints(
+    deliveryId: string,
+    count: number,
+    createdAt: string,
+  ): RepositoryResult<DeliveryMessageCheckpoint[]>;
+  markMessageSent(
+    deliveryId: string,
+    sequence: number,
+    sentAt: string,
+  ): RepositoryResult<void>;
+  markMessageFailed(
+    deliveryId: string,
+    sequence: number,
+    error: string,
+    updatedAt: string,
+  ): RepositoryResult<void>;
 }
 
 type DeliveryRow = typeof digestDeliveries.$inferSelect;
@@ -60,6 +90,23 @@ function mapDelivery(row: DeliveryRow): DigestDeliveryRecord {
     updatedAt: row.updatedAt,
     sentAt: row.sentAt ?? undefined,
     error: row.error ?? undefined,
+  };
+}
+
+type DeliveryMessageRow = typeof deliveryMessages.$inferSelect;
+
+function mapMessageCheckpoint(
+  row: DeliveryMessageRow,
+): DeliveryMessageCheckpoint {
+  return {
+    id: row.id,
+    deliveryId: row.deliveryId,
+    sequence: row.sequence,
+    status: row.status as DeliveryMessageCheckpoint["status"],
+    sentAt: row.sentAt ?? undefined,
+    error: row.error ?? undefined,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
   };
 }
 
@@ -141,16 +188,26 @@ export class PostgresDigestDeliveryRepository
   ): Promise<DigestDeliveryRecord | null> {
     const current = await this.findBySubscriptionId(subscriptionId);
 
-    if (!current || current.status === "sent") {
+    if (
+      !current ||
+      current.status === "ready" ||
+      current.status === "sending" ||
+      current.status === "sent"
+    ) {
       return current;
     }
 
     const [row] = await this.db
       .update(digestDeliveries)
       .set({ status: "ready", updatedAt, error: null })
-      .where(eq(digestDeliveries.id, current.id))
+      .where(
+        and(
+          eq(digestDeliveries.id, current.id),
+          inArray(digestDeliveries.status, ["waiting-telegram", "failed"]),
+        ),
+      )
       .returning();
-    return row ? mapDelivery(row) : null;
+    return row ? mapDelivery(row) : this.findById(current.id);
   }
 
   async claimForSending(
@@ -177,10 +234,38 @@ export class PostgresDigestDeliveryRepository
       return { status: "claimed", delivery: mapDelivery(claimed) };
     }
 
-    const delivery = await this.findById(id);
+    let delivery = await this.findById(id);
 
     if (!delivery) {
       return { status: "not-found" };
+    }
+
+    if (
+      delivery.status === "sending" &&
+      isDeliveryLeaseExpired(delivery, updatedAt)
+    ) {
+      const [reclaimed] = await this.db
+        .update(digestDeliveries)
+        .set({
+          status: "sending",
+          updatedAt,
+          error: null,
+          attemptCount: sql`${digestDeliveries.attemptCount} + 1`,
+        })
+        .where(
+          and(
+            eq(digestDeliveries.id, id),
+            eq(digestDeliveries.status, "sending"),
+            eq(digestDeliveries.updatedAt, delivery.updatedAt),
+          ),
+        )
+        .returning();
+
+      if (reclaimed) {
+        return { status: "claimed", delivery: mapDelivery(reclaimed) };
+      }
+
+      delivery = (await this.findById(id)) ?? delivery;
     }
 
     if (delivery.status === "waiting-telegram") {
@@ -214,6 +299,70 @@ export class PostgresDigestDeliveryRepository
     return this.update(id, { status: "failed", updatedAt, error });
   }
 
+  async ensureMessageCheckpoints(
+    deliveryId: string,
+    count: number,
+    createdAt: string,
+  ): Promise<DeliveryMessageCheckpoint[]> {
+    if (count > 0) {
+      await this.db
+        .insert(deliveryMessages)
+        .values(
+          Array.from({ length: count }, (_, sequence) => ({
+            id: `message:${deliveryId}:${sequence}`,
+            deliveryId,
+            sequence,
+            status: "pending",
+            createdAt,
+            updatedAt: createdAt,
+          })),
+        )
+        .onConflictDoNothing({
+          target: [deliveryMessages.deliveryId, deliveryMessages.sequence],
+        });
+    }
+
+    const rows = await this.db
+      .select()
+      .from(deliveryMessages)
+      .where(eq(deliveryMessages.deliveryId, deliveryId))
+      .orderBy(asc(deliveryMessages.sequence));
+    return rows.map(mapMessageCheckpoint);
+  }
+
+  async markMessageSent(
+    deliveryId: string,
+    sequence: number,
+    sentAt: string,
+  ): Promise<void> {
+    await this.db
+      .update(deliveryMessages)
+      .set({ status: "sent", sentAt, updatedAt: sentAt, error: null })
+      .where(
+        and(
+          eq(deliveryMessages.deliveryId, deliveryId),
+          eq(deliveryMessages.sequence, sequence),
+        ),
+      );
+  }
+
+  async markMessageFailed(
+    deliveryId: string,
+    sequence: number,
+    error: string,
+    updatedAt: string,
+  ): Promise<void> {
+    await this.db
+      .update(deliveryMessages)
+      .set({ status: "failed", error, updatedAt })
+      .where(
+        and(
+          eq(deliveryMessages.deliveryId, deliveryId),
+          eq(deliveryMessages.sequence, sequence),
+        ),
+      );
+  }
+
   private async update(
     id: string,
     patch: Partial<typeof digestDeliveries.$inferInsert>,
@@ -232,6 +381,10 @@ export class InMemoryDigestDeliveryRepository
 {
   private readonly byId = new Map<string, DigestDeliveryRecord>();
   private readonly idBySubscription = new Map<string, string>();
+  private readonly messageCheckpoints = new Map<
+    string,
+    DeliveryMessageCheckpoint
+  >();
 
   create(record: DigestDeliveryRecord): DigestDeliveryRecord {
     const existing = this.findByIssueKey(record.issueKey);
@@ -274,7 +427,12 @@ export class InMemoryDigestDeliveryRepository
   ): DigestDeliveryRecord | null {
     const delivery = this.findBySubscriptionId(subscriptionId);
 
-    if (!delivery || delivery.status === "sent") {
+    if (
+      !delivery ||
+      delivery.status === "ready" ||
+      delivery.status === "sending" ||
+      delivery.status === "sent"
+    ) {
       return delivery;
     }
 
@@ -297,7 +455,9 @@ export class InMemoryDigestDeliveryRepository
     }
 
     if (delivery.status === "sending") {
-      return { status: "already-sending", delivery };
+      if (!isDeliveryLeaseExpired(delivery, updatedAt)) {
+        return { status: "already-sending", delivery };
+      }
     }
 
     if (delivery.status === "sent") {
@@ -308,6 +468,7 @@ export class InMemoryDigestDeliveryRepository
       status: "sending",
       updatedAt,
       error: undefined,
+      attemptCount: delivery.attemptCount + 1,
     });
 
     return { status: "claimed", delivery: claimed as DigestDeliveryRecord };
@@ -332,6 +493,70 @@ export class InMemoryDigestDeliveryRepository
       updatedAt,
       error,
     });
+  }
+
+  ensureMessageCheckpoints(
+    deliveryId: string,
+    count: number,
+    createdAt: string,
+  ): DeliveryMessageCheckpoint[] {
+    for (let sequence = 0; sequence < count; sequence += 1) {
+      const key = `${deliveryId}:${sequence}`;
+
+      if (!this.messageCheckpoints.has(key)) {
+        this.messageCheckpoints.set(key, {
+          id: `message:${deliveryId}:${sequence}`,
+          deliveryId,
+          sequence,
+          status: "pending",
+          createdAt,
+          updatedAt: createdAt,
+        });
+      }
+    }
+
+    return [...this.messageCheckpoints.values()]
+      .filter((message) => message.deliveryId === deliveryId)
+      .sort((left, right) => left.sequence - right.sequence);
+  }
+
+  markMessageSent(
+    deliveryId: string,
+    sequence: number,
+    sentAt: string,
+  ): void {
+    this.updateMessage(deliveryId, sequence, {
+      status: "sent",
+      sentAt,
+      updatedAt: sentAt,
+      error: undefined,
+    });
+  }
+
+  markMessageFailed(
+    deliveryId: string,
+    sequence: number,
+    error: string,
+    updatedAt: string,
+  ): void {
+    this.updateMessage(deliveryId, sequence, {
+      status: "failed",
+      error,
+      updatedAt,
+    });
+  }
+
+  private updateMessage(
+    deliveryId: string,
+    sequence: number,
+    patch: Partial<DeliveryMessageCheckpoint>,
+  ): void {
+    const key = `${deliveryId}:${sequence}`;
+    const current = this.messageCheckpoints.get(key);
+
+    if (current) {
+      this.messageCheckpoints.set(key, { ...current, ...patch });
+    }
   }
 
   private update(

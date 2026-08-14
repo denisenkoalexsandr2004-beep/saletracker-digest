@@ -14,6 +14,7 @@ import {
   getAgentSources,
   newsSourceRegistry,
 } from "@/features/news-sources/news-source.registry";
+import type { NewsSource } from "@/features/news-sources/news-source.types";
 import { digestTags } from "@/features/subscriptions/subscription.categories";
 import { env } from "@/shared/config/env";
 
@@ -67,9 +68,18 @@ export interface RunNewsAgentInput {
 interface RawResponse {
   output?: Array<{
     type?: string;
+    action?: {
+      sources?: Array<{
+        url?: string;
+      }>;
+    };
     content?: Array<{
       type?: string;
       text?: string;
+      annotations?: Array<{
+        type?: string;
+        url?: string;
+      }>;
     }>;
   }>;
   error?: {
@@ -152,6 +162,75 @@ function extractOutputText(response: RawResponse): string | null {
   return null;
 }
 
+export function extractWebSearchSourceUrls(response: RawResponse): string[] {
+  const urls = new Set<string>();
+
+  for (const output of response.output ?? []) {
+    for (const source of output.action?.sources ?? []) {
+      if (source.url) {
+        urls.add(source.url);
+      }
+    }
+
+    for (const content of output.content ?? []) {
+      for (const annotation of content.annotations ?? []) {
+        if (annotation.type === "url_citation" && annotation.url) {
+          urls.add(annotation.url);
+        }
+      }
+    }
+  }
+
+  return [...urls];
+}
+
+function articleUrlIdentity(value: string): string | null {
+  try {
+    const url = new URL(value);
+    const hostname = url.hostname.toLowerCase().replace(/^www\./, "");
+    const pathname = url.pathname.replace(/\/+$/, "") || "/";
+    const trackingParameters = new Set([
+      "fbclid",
+      "gclid",
+      "yclid",
+      "from",
+      "ref",
+      "source",
+    ]);
+
+    for (const key of [...url.searchParams.keys()]) {
+      const normalizedKey = key.toLowerCase();
+
+      if (
+        normalizedKey.startsWith("utm_") ||
+        trackingParameters.has(normalizedKey)
+      ) {
+        url.searchParams.delete(key);
+      }
+    }
+
+    url.searchParams.sort();
+    const query = url.searchParams.toString();
+    return `${hostname}${pathname}${query ? `?${query}` : ""}`;
+  } catch {
+    return null;
+  }
+}
+
+export function wasSourceConsulted(
+  sourceUrl: string,
+  consultedUrls: readonly string[],
+): boolean {
+  const candidateIdentity = articleUrlIdentity(sourceUrl);
+
+  return Boolean(
+    candidateIdentity &&
+      consultedUrls.some(
+        (consultedUrl) => articleUrlIdentity(consultedUrl) === candidateIdentity,
+      ),
+  );
+}
+
 function isUrlFromAllowedDomain(url: string, domains: string[]): boolean {
   const hostname = new URL(url).hostname.toLowerCase().replace(/^www\./, "");
 
@@ -166,6 +245,65 @@ function selectSources(sourceIds?: string[]) {
   return getAgentSources().filter(
     (source) => !allowedIds || allowedIds.has(source.id),
   );
+}
+
+export function buildNewsAgentRequest(
+  input: RunNewsAgentInput,
+  sources: NewsSource[],
+  now: string,
+) {
+  const allowedDomains = [
+    ...new Set(sources.map((source) => source.searchDomain)),
+  ];
+  const dateFrom = new Date(now);
+  dateFrom.setUTCDate(dateFrom.getUTCDate() - input.days);
+
+  return {
+    allowedDomains,
+    dateFrom: dateFrom.toISOString(),
+    body: {
+      model: env.OPENAI_NEWS_MODEL,
+      reasoning: { effort: "low" },
+      tools: [
+        {
+          type: "web_search",
+          search_context_size: "high",
+          external_web_access: true,
+          filters: {
+            allowed_domains: allowedDomains,
+          },
+        },
+      ],
+      tool_choice: "required",
+      include: ["web_search_call.action.sources"],
+      input: [
+        {
+          role: "system",
+          content:
+            "Вы — исследовательский агент редакции SaleTracker. Собирайте только реальные русскоязычные новости о ритейле, FMCG, non-food, поставщиках, закупках, маркетплейсах и логистике. Обязательно выполняйте живой веб-поиск. Не выдумывайте цифры, даты, названия и URL. Каждая карточка должна содержать минимум один проверяемый числовой показатель и естественно сформулированное значение для бизнеса поставщика или закупщика. Не сводите вывод механически к деньгам: объясняйте влияние на спрос, условия контракта, ассортимент, поставки, риски или возможности. Если чисел или достоверной даты публикации в источнике нет, не включайте сюжет. Корпоративное заявление помечайте фактически и не превращайте в независимую оценку. Не публикуйте материалы: результат — только очередь на редакторскую проверку.",
+        },
+        {
+          role: "user",
+          content: [
+            `Текущее серверное время: ${now}.`,
+            `Найдите до ${input.maxCandidates} наиболее значимых материалов, опубликованных не раньше ${dateFrom.toISOString()} и не позже текущего времени.`,
+            "Приоритет: выручка, цены, маржа, комиссии, инвестиции, объемы производства и продаж, логистика, доля рынка, изменения требований сетей.",
+            "Верните прямой URL конкретной статьи, которую вы действительно открыли в ходе поиска, а не главной страницы или поисковой выдачи.",
+            "Пишите summary, marketImpact и businessImpact по-русски, кратко, профессионально и без шаблонной формулы «что это значит для денег».",
+            `Используйте только релевантные теги из каталога SaleTracker: ${digestTags.join(", ")}.`,
+          ].join("\n"),
+        },
+      ],
+      text: {
+        format: {
+          type: "json_schema",
+          name: "saletracker_news_candidates",
+          strict: true,
+          schema: outputSchema,
+        },
+      },
+    },
+  } as const;
 }
 
 export async function runNewsAgent(
@@ -190,9 +328,7 @@ export async function runNewsAgent(
   }
 
   const startedAt = new Date().toISOString();
-  const allowedDomains = [...new Set(sources.map((source) => source.searchDomain))];
-  const dateFrom = new Date();
-  dateFrom.setUTCDate(dateFrom.getUTCDate() - input.days);
+  const request = buildNewsAgentRequest(input, sources, startedAt);
 
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
@@ -200,46 +336,7 @@ export async function runNewsAgent(
       Authorization: `Bearer ${env.OPENAI_API_KEY}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      model: env.OPENAI_NEWS_MODEL,
-      reasoning: { effort: "low" },
-      tools: [
-        {
-          type: "web_search",
-          search_context_size: "medium",
-          filters: {
-            allowed_domains: allowedDomains,
-          },
-        },
-      ],
-      tool_choice: "auto",
-      include: ["web_search_call.action.sources"],
-      input: [
-        {
-          role: "system",
-          content:
-            "Вы — исследовательский агент редакции SaleTracker. Собирайте только реальные русскоязычные новости о ритейле, FMCG, non-food, поставщиках, закупках, маркетплейсах и логистике. Не выдумывайте цифры, даты, названия и URL. Каждая карточка должна содержать минимум один проверяемый числовой показатель и естественно сформулированное значение для бизнеса поставщика или закупщика. Не сводите вывод механически к деньгам: объясняйте влияние на спрос, условия контракта, ассортимент, поставки, риски или возможности. Если чисел в источнике нет, не включайте сюжет. Корпоративное заявление помечайте фактически и не превращайте в независимую оценку. Не публикуйте материалы: результат — только очередь на редакторскую проверку.",
-        },
-        {
-          role: "user",
-          content: [
-            `Найдите до ${input.maxCandidates} наиболее значимых материалов, опубликованных не раньше ${dateFrom.toISOString()}.`,
-            "Приоритет: выручка, цены, маржа, комиссии, инвестиции, объемы производства и продаж, логистика, доля рынка, изменения требований сетей.",
-            "Верните прямой URL конкретной статьи, а не главной страницы или поисковой выдачи.",
-            "Пишите summary, marketImpact и businessImpact по-русски, кратко, профессионально и без шаблонной формулы «что это значит для денег».",
-            `Используйте только релевантные теги из каталога SaleTracker: ${digestTags.join(", ")}.`,
-          ].join("\n"),
-        },
-      ],
-      text: {
-        format: {
-          type: "json_schema",
-          name: "saletracker_news_candidates",
-          strict: true,
-          schema: outputSchema,
-        },
-      },
-    }),
+    body: JSON.stringify(request.body),
     signal: AbortSignal.timeout(90_000),
   });
 
@@ -255,6 +352,7 @@ export async function runNewsAgent(
   }
 
   const outputText = extractOutputText(responseBody);
+  const consultedUrls = extractWebSearchSourceUrls(responseBody);
 
   if (!outputText) {
     throw new NewsAgentError(
@@ -293,14 +391,15 @@ export async function runNewsAgent(
       quality: checkCandidateQuality(
         candidate,
         sources,
-        dateFrom.toISOString(),
+        request.dateFrom,
         collectedAt,
       ),
     }))
     .filter(
       ({ candidate, quality }) =>
         quality.accepted &&
-        isUrlFromAllowedDomain(candidate.sourceUrl, allowedDomains),
+        isUrlFromAllowedDomain(candidate.sourceUrl, request.allowedDomains) &&
+        wasSourceConsulted(candidate.sourceUrl, consultedUrls),
     )
     .slice(0, input.maxCandidates)
     .map<NewsCandidate>(({ candidate, quality }) => ({

@@ -8,7 +8,10 @@ import type {
   DigestDeliveryRecord,
   DigestDeliveryView,
 } from "@/features/deliveries/digest-delivery.types";
-import { buildDigestIssue } from "@/features/digests/digest.service";
+import {
+  buildDigestIssue,
+  getSourceFreshnessStart,
+} from "@/features/digests/digest.service";
 import type {
   CzsEvent,
   DigestIssue,
@@ -25,10 +28,8 @@ import {
   escapeTelegramHtml,
 } from "@/features/telegram/telegram.formatter";
 import type { TelegramGateway } from "@/features/telegram/telegram.types";
-import { demoEvents, demoMaterials } from "@/shared/demo-data";
 import { isDatabaseConfigured } from "@/shared/database/client";
-
-const FIRST_ISSUE_LOOKBACK_DAYS = 14;
+import { demoEvents, demoMaterials } from "@/shared/demo-data";
 
 export class DigestDeliveryError extends Error {
   constructor(
@@ -60,18 +61,12 @@ interface DispatchDependencies {
   deliveries?: DigestDeliveryRepository;
 }
 
-function firstIssueStart(now: string): string {
-  const start = new Date(now);
-  start.setUTCDate(start.getUTCDate() - FIRST_ISSUE_LOOKBACK_DAYS);
-  return start.toISOString();
-}
-
 function buildIssueForSubscription(
   subscription: SubscriptionRecord,
   now: string,
   materials: Material[],
   events: CzsEvent[],
-  since = firstIssueStart(now),
+  since = getSourceFreshnessStart(subscription.frequency, now),
 ): DigestIssue {
   return buildDigestIssue({
     role: subscription.role,
@@ -98,12 +93,14 @@ export async function ensureDigestDelivery(
   }
 
   const now = options.now ?? new Date().toISOString();
+  const since =
+    options.since ?? getSourceFreshnessStart(subscription.frequency, now);
   const issue = buildIssueForSubscription(
     subscription,
     now,
     options.materials ?? (isDatabaseConfigured() ? [] : demoMaterials),
     options.events ?? demoEvents,
-    options.since,
+    since,
   );
 
   return repository.create({
@@ -163,24 +160,17 @@ export async function markDigestDeliveryReady(
 ): Promise<DigestDeliveryRecord> {
   const materials =
     options.materials ?? (await getMaterialRepository().listApproved());
-  let delivery = await ensureDigestDelivery(
+  const connectedAt = subscription.telegram?.connectedAt ?? now;
+  const delivery = await ensureDigestDelivery(
     subscription,
-    { ...options, materials, now },
+    {
+      ...options,
+      materials,
+      now,
+      issueKey: options.issueKey ?? `${subscription.id}:connected:${connectedAt}`,
+    },
     deliveries,
   );
-
-  if (!delivery.issue.items.length && materials.length) {
-    delivery = await ensureDigestDelivery(
-      subscription,
-      {
-        ...options,
-        materials,
-        now,
-        issueKey: `${subscription.id}:connected:${now}`,
-      },
-      deliveries,
-    );
-  }
 
   return (
     (await deliveries.markReadyBySubscriptionId(subscription.id, now)) ?? delivery
@@ -365,22 +355,49 @@ export async function dispatchDigestDelivery(
   }
 
   try {
-    await dependencies.gateway.sendMessage(
-      chatId,
-      createDigestGreeting(claimed.delivery.issue, subscription.name),
-      { parseMode: "HTML", disableLinkPreview: true },
-    );
-
     const messages = createTelegramDeliveryPlan(
       claimed.delivery.issue,
       dependencies.appUrl,
     );
+    const outbound = [
+      createDigestGreeting(claimed.delivery.issue, subscription.name),
+      ...messages.map((message) => message.html),
+    ];
+    const checkpoints = await deliveries.ensureMessageCheckpoints(
+      deliveryId,
+      outbound.length,
+      dependencies.now(),
+    );
+    const sentSequences = new Set(
+      checkpoints
+        .filter((checkpoint) => checkpoint.status === "sent")
+        .map((checkpoint) => checkpoint.sequence),
+    );
 
-    for (const message of messages) {
-      await dependencies.gateway.sendMessage(chatId, message.html, {
-        parseMode: "HTML",
-        disableLinkPreview: true,
-      });
+    for (const [sequence, html] of outbound.entries()) {
+      if (sentSequences.has(sequence)) {
+        continue;
+      }
+
+      try {
+        await dependencies.gateway.sendMessage(chatId, html, {
+          parseMode: "HTML",
+          disableLinkPreview: true,
+        });
+        await deliveries.markMessageSent(
+          deliveryId,
+          sequence,
+          dependencies.now(),
+        );
+      } catch (error) {
+        await deliveries.markMessageFailed(
+          deliveryId,
+          sequence,
+          error instanceof Error ? error.message : "Ошибка Telegram API.",
+          dependencies.now(),
+        );
+        throw error;
+      }
     }
 
     const sentAt = dependencies.now();
