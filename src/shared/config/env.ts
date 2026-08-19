@@ -38,6 +38,12 @@ const envSchema = z.object({
     .min(24)
     .max(720)
     .default(48),
+  NEWS_AGENT_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .min(10_000)
+    .max(300_000)
+    .default(55_000),
 });
 
 function optionalTrimmed(value: string | undefined): string | undefined {
@@ -69,6 +75,7 @@ export function parseEnvironment(
     NEWS_APPROVED_SOURCE_MAX_AGE_HOURS: optionalTrimmed(
       source.NEWS_APPROVED_SOURCE_MAX_AGE_HOURS,
     ),
+    NEWS_AGENT_TIMEOUT_MS: optionalTrimmed(source.NEWS_AGENT_TIMEOUT_MS),
   });
 }
 

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildNewsAgentRequest,
   extractWebSearchSourceUrls,
+  selectRotatedSources,
   wasSourceConsulted,
 } from "@/features/news-ingestion/openai-news-agent";
 import { newsSourceRegistry } from "@/features/news-sources/news-source.registry";
@@ -37,6 +38,31 @@ describe("OpenAI news agent source evidence", () => {
       request.body.text.format.schema.properties.candidates.items;
 
     expect(candidateSchema.properties.sourceUrl).toEqual({ type: "string" });
+  });
+
+  it("keeps one run inside the domain budget and rotates across slots", () => {
+    const sources = newsSourceRegistry.filter((source) => source.enabledForAgent);
+    const first = selectRotatedSources(sources, 0);
+    const second = selectRotatedSources(sources, 1);
+
+    expect(sources.length).toBeGreaterThan(10);
+    expect(first.length).toBeLessThanOrEqual(10);
+    expect(first.map((source) => source.id)).not.toEqual(
+      second.map((source) => source.id),
+    );
+    // Слот повторяется по кругу, а группы вместе покрывают весь реестр.
+    const groups = Math.ceil(sources.length / 10);
+    const covered = new Set(
+      Array.from({ length: groups }, (_, slot) =>
+        selectRotatedSources(sources, slot),
+      )
+        .flat()
+        .map((source) => source.id),
+    );
+    expect(covered.size).toBe(sources.length);
+    expect(selectRotatedSources(sources, groups).map((s) => s.id)).toEqual(
+      first.map((s) => s.id),
+    );
   });
 
   it("extracts all consulted and cited URLs from a Responses API result", () => {

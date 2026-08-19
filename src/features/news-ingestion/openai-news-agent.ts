@@ -18,6 +18,8 @@ import type { NewsSource } from "@/features/news-sources/news-source.types";
 import { digestTags } from "@/features/subscriptions/subscription.categories";
 import { env } from "@/shared/config/env";
 
+const MAX_DOMAINS_PER_RUN = 10;
+
 const agentCandidateSchema = z.object({
   title: z.string().trim().min(8).max(180),
   sourceName: z.string().trim().min(2).max(100),
@@ -247,6 +249,30 @@ function selectSources(sourceIds?: string[]) {
   );
 }
 
+/**
+ * Веб-поиск деградирует на широком списке доменов: вместо конкретных статей
+ * агент выходит на страницы-рубрикаторы, которые проверка прямой ссылки
+ * отбраковывает. Замеры: 40 доменов — ноль карточек, 20 — одна, 10 — восемь.
+ *
+ * Поэтому каждый прогон работает со своей группой доменов, а соседние слоты
+ * берут следующие группы: за несколько запусков реестр покрывается целиком.
+ * Шаг выбирается через прореживание, чтобы в группе оказывались источники
+ * разного типа, а не только госорганы подряд.
+ */
+export function selectRotatedSources(
+  sources: NewsSource[],
+  slot: number,
+  maxDomains = MAX_DOMAINS_PER_RUN,
+): NewsSource[] {
+  if (sources.length <= maxDomains) {
+    return sources;
+  }
+
+  const groups = Math.ceil(sources.length / maxDomains);
+  const index = ((Math.trunc(slot) % groups) + groups) % groups;
+  return sources.filter((_, position) => position % groups === index);
+}
+
 export function buildNewsAgentRequest(
   input: RunNewsAgentInput,
   sources: NewsSource[],
@@ -317,9 +343,9 @@ export async function runNewsAgent(
     );
   }
 
-  const sources = selectSources(input.sourceIds);
+  const available = selectSources(input.sourceIds);
 
-  if (!sources.length) {
+  if (!available.length) {
     throw new NewsAgentError(
       "NO_ALLOWED_SOURCES",
       "Не выбрано ни одного разрешённого источника.",
@@ -328,6 +354,14 @@ export async function runNewsAgent(
   }
 
   const startedAt = new Date().toISOString();
+  // Явно выбранные редактором источники используются целиком, автоматический
+  // прогон берёт очередную группу — слот меняется раз в час.
+  const sources = input.sourceIds?.length
+    ? available
+    : selectRotatedSources(
+        available,
+        Math.floor(Date.parse(startedAt) / 3_600_000),
+      );
   const request = buildNewsAgentRequest(input, sources, startedAt);
 
   const response = await fetch("https://api.openai.com/v1/responses", {
@@ -337,9 +371,10 @@ export async function runNewsAgent(
       "Content-Type": "application/json",
     },
     body: JSON.stringify(request.body),
-    // Держимся внутри лимита времени serverless-функции (maxDuration = 60),
-    // чтобы платформа не убивала запрос вместо осмысленной ошибки.
-    signal: AbortSignal.timeout(50_000),
+    // На Vercel Hobby потолок выполнения — 60 секунд, поэтому по умолчанию
+    // обрываем запрос чуть раньше и отдаём осмысленную ошибку вместо того,
+    // чтобы платформа убила процесс. На своём сервере лимит можно поднять.
+    signal: AbortSignal.timeout(env.NEWS_AGENT_TIMEOUT_MS),
   });
 
   const responseBody = (await response.json()) as RawResponse;
