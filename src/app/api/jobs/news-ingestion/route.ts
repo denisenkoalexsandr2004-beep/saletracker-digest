@@ -37,9 +37,12 @@ export async function POST(request: Request) {
     const result = await runIdempotentJob({
       kind: "news-ingestion",
       idempotencyKey: `news-ingestion:${hourSlot}`,
-      payload: { days: 2, maxCandidates: 12 },
+      // Окно шире часового интервала намеренно: за два дня по одной группе
+      // доменов публикаций может не оказаться вовсе. Повторные находки не
+      // копятся — адрес публикации в базе уникален.
+      payload: { days: 5, maxCandidates: 12 },
       execute: async () => {
-        const ingestion = await runNewsAgent({ days: 2, maxCandidates: 12 });
+        const ingestion = await runNewsAgent({ days: 5, maxCandidates: 12 });
         return {
           runId: ingestion.run.id,
           candidateCount: ingestion.candidates.length,
