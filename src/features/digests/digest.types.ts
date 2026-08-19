@@ -68,4 +68,6 @@ export interface DigestIssue {
   event: CzsEvent | null;
   cta: string;
   ctaUrl: string;
+  /** Состав собран редактором вручную и не пересобирается автоматически. */
+  curated?: boolean;
 }

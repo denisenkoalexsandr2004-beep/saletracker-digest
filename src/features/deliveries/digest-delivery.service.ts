@@ -96,6 +96,7 @@ export async function ensureDigestDelivery(
   const canRebuild =
     existing !== null &&
     existing.issue.items.length === 0 &&
+    !existing.issue.curated &&
     existing.status !== "sending" &&
     existing.status !== "sent";
 
@@ -277,6 +278,7 @@ export function toDigestDeliveryView(
       itemCount: delivery.issue.items.length,
       personalizedCount: delivery.issue.personalizedCount,
       generalCount: delivery.issue.generalCount,
+      curated: Boolean(delivery.issue.curated),
       eventName: delivery.issue.event?.name,
       items: delivery.issue.items.map((item) => ({
         id: item.id,
@@ -306,6 +308,59 @@ export async function listDigestDeliveryViews(
     }),
   );
   return views.filter((view): view is DigestDeliveryView => Boolean(view));
+}
+
+/**
+ * Ручной состав персонального выпуска. Редактор выбирает конкретные материалы
+ * из утверждённой базы, порядок сохраняется, автосборка после этого отключается.
+ */
+export async function setDigestDeliveryItems(
+  deliveryId: string,
+  materialIds: string[],
+  deliveries: DigestDeliveryRepository = getDigestDeliveryRepository(),
+  subscriptions: SubscriptionRepository = getSubscriptionRepository(),
+): Promise<DigestDeliveryRecord> {
+  const delivery = await deliveries.findById(deliveryId);
+
+  if (!delivery) {
+    throw new DigestDeliveryError(
+      "DELIVERY_NOT_FOUND",
+      "Персональный выпуск не найден.",
+    );
+  }
+
+  if (delivery.status === "sending" || delivery.status === "sent") {
+    throw new DigestDeliveryError(
+      "DELIVERY_IN_PROGRESS",
+      "Состав уже отправленного выпуска изменить нельзя.",
+    );
+  }
+
+  const subscription = await subscriptions.findById(delivery.subscriptionId);
+  const approved = await getMaterialRepository().listApproved();
+  const byId = new Map(approved.map((material) => [material.id, material]));
+  const items = materialIds
+    .map((id) => byId.get(id))
+    .filter((material): material is Material => Boolean(material));
+  const selectedTags = new Set(subscription?.tags ?? []);
+  const personalizedCount = items.filter((item) =>
+    item.tags.some((tag) => selectedTags.has(tag)),
+  ).length;
+  const issue: DigestIssue = {
+    ...delivery.issue,
+    items,
+    personalizedCount,
+    generalCount: items.length - personalizedCount,
+    curated: true,
+  };
+
+  return (
+    (await deliveries.replaceIssue(
+      deliveryId,
+      issue,
+      new Date().toISOString(),
+    )) ?? delivery
+  );
 }
 
 export async function dispatchDigestDelivery(

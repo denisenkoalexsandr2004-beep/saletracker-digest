@@ -4,6 +4,7 @@ import {
   buildDigestIssue,
   findMatchingEvent,
   getEventCta,
+  getWelcomeFreshnessStart,
 } from "@/features/digests/digest.service";
 import type { Material } from "@/features/digests/digest.types";
 import { demoEvents, demoMaterials } from "@/shared/demo-data";
@@ -176,5 +177,14 @@ describe("коммерческий маршрут ЦЗС", () => {
     expect(getEventCta("supplier")).toContain("вывести свой продукт");
     expect(getEventCta("buyer")).toContain("новых поставщиков");
     expect(getEventCta("both")).toContain("закупок и поставок");
+  });
+
+  it("расширяет окно свежести для первого выпуска", () => {
+    expect(getWelcomeFreshnessStart("daily", "2026-08-19T12:00:00.000Z")).toBe(
+      "2026-08-05T12:00:00.000Z",
+    );
+    expect(
+      getWelcomeFreshnessStart("monthly", "2026-08-19T12:00:00.000Z"),
+    ).toBe("2026-07-15T12:00:00.000Z");
   });
 });

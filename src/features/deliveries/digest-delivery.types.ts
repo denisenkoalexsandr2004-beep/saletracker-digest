@@ -62,6 +62,7 @@ export interface DigestDeliveryView {
     itemCount: number;
     personalizedCount: number;
     generalCount: number;
+    curated: boolean;
     eventName?: string;
     items: Array<{
       id: string;

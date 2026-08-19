@@ -143,6 +143,36 @@ describe("digest delivery", () => {
     expect(delivery.issue.items).toHaveLength(0);
   });
 
+  it("пересобирает пустой первый выпуск, когда материалы появились позже", async () => {
+    const subscriptions = new InMemorySubscriptionRepository();
+    const deliveries = new InMemoryDigestDeliveryRepository();
+    const subscription = subscriptions.create(buildSubscription(false));
+    const empty = await ensureDigestDelivery(
+      subscription,
+      {
+        now: "2026-07-24T12:00:00+03:00",
+        materials: [],
+        events: demoEvents,
+      },
+      deliveries,
+    );
+
+    expect(empty.issue.items).toHaveLength(0);
+
+    const rebuilt = await ensureDigestDelivery(
+      subscription,
+      {
+        now: "2026-07-24T13:00:00+03:00",
+        materials: freshDemoMaterials,
+        events: demoEvents,
+      },
+      deliveries,
+    );
+
+    expect(rebuilt.id).toBe(empty.id);
+    expect(rebuilt.issue.items.length).toBeGreaterThan(0);
+  });
+
   it("пересобирает первый выпуск на момент подключения Telegram", async () => {
     const subscriptions = new InMemorySubscriptionRepository();
     const deliveries = new InMemoryDigestDeliveryRepository();

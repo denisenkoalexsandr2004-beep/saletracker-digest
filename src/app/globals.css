@@ -2859,3 +2859,131 @@ button {
   color: #a33225;
   font-weight: 650;
 }
+
+/* Фильтры редакторской очереди */
+.material-filters {
+  margin-bottom: 16px;
+  padding: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  background: var(--mineral-100);
+  border-radius: 8px;
+}
+
+.material-filters input,
+.material-filters select {
+  padding: 8px 10px;
+  color: var(--ink-950);
+  background: var(--paper-strong);
+  border: 1px solid var(--mineral-200);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.material-filter-search {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.material-filter-reset {
+  padding: 8px 12px;
+  color: var(--ink-700);
+  background: var(--paper-strong);
+  border: 1px solid var(--mineral-200);
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.material-filter-count {
+  margin-left: auto;
+  color: var(--ink-700);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* Ручной состав персонального выпуска */
+.composition-bar {
+  margin-top: 18px;
+  padding-top: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  border-top: 1px solid var(--mineral-200);
+}
+
+.composition-origin {
+  color: var(--ink-700);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.composition-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.composition-picker {
+  margin-top: 16px;
+  padding: 16px;
+  background: var(--paper-strong);
+  border: 1px solid var(--mineral-200);
+  border-radius: 8px;
+}
+
+.composition-options {
+  max-height: 320px;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.composition-options label {
+  padding: 10px;
+  display: flex;
+  gap: 10px;
+  align-items: start;
+  border: 1px solid var(--mineral-200);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.composition-options label:hover {
+  border-color: var(--mint-400);
+}
+
+.composition-options input {
+  margin-top: 3px;
+  accent-color: var(--signal);
+  flex: none;
+}
+
+.composition-options span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.composition-options strong {
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.composition-options em {
+  color: var(--ink-500);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 11px;
+  font-style: normal;
+}

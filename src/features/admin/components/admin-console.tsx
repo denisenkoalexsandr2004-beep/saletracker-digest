@@ -114,20 +114,69 @@ export function AdminConsole({
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isCollecting, setIsCollecting] = useState(false);
   const [promotingId, setPromotingId] = useState<string | null>(null);
+  const [materialSearch, setMaterialSearch] = useState("");
+  const [materialTag, setMaterialTag] = useState("");
+  const [materialSource, setMaterialSource] = useState("");
+  const [editingDeliveryId, setEditingDeliveryId] = useState<string | null>(
+    null,
+  );
+  const [draftItemIds, setDraftItemIds] = useState<string[]>([]);
+  const [isSavingComposition, setIsSavingComposition] = useState(false);
   const [queueNotice, setQueueNotice] = useState<{
     type: "success" | "error";
     text: string;
   } | null>(null);
 
-  const visibleMaterials = useMemo(
+  const materialTagOptions = useMemo(
     () =>
-      materials.filter((material) => {
-        if (filter === "all") {
-          return true;
-        }
-        return material.status === filter;
-      }),
-    [filter, materials],
+      [...new Set(materials.flatMap((material) => material.tags))].sort(
+        (left, right) => left.localeCompare(right, "ru"),
+      ),
+    [materials],
+  );
+
+  const materialSourceOptions = useMemo(
+    () =>
+      [...new Set(materials.flatMap((material) => material.sourceNames))].sort(
+        (left, right) => left.localeCompare(right, "ru"),
+      ),
+    [materials],
+  );
+
+  const visibleMaterials = useMemo(() => {
+    const query = materialSearch.trim().toLowerCase();
+
+    return materials.filter((material) => {
+      if (filter !== "all" && material.status !== filter) {
+        return false;
+      }
+
+      if (materialTag && !material.tags.includes(materialTag)) {
+        return false;
+      }
+
+      if (materialSource && !material.sourceNames.includes(materialSource)) {
+        return false;
+      }
+
+      if (!query) {
+        return true;
+      }
+
+      return (
+        material.title.toLowerCase().includes(query) ||
+        material.summary.toLowerCase().includes(query)
+      );
+    });
+  }, [filter, materialSearch, materialSource, materialTag, materials]);
+
+  const approvedMaterials = useMemo(
+    () => materials.filter((material) => material.status === "approved"),
+    [materials],
+  );
+
+  const isMaterialFilterActive = Boolean(
+    materialSearch.trim() || materialTag || materialSource,
   );
 
   const approvedCount = materials.filter(
@@ -312,6 +361,62 @@ export function AdminConsole({
     }
   }
 
+  function startComposition(delivery: DigestDeliveryView) {
+    setEditingDeliveryId(delivery.id);
+    setDraftItemIds(delivery.issue.items.map((item) => item.id));
+    setQueueNotice(null);
+  }
+
+  function toggleDraftItem(materialId: string) {
+    setDraftItemIds((current) =>
+      current.includes(materialId)
+        ? current.filter((id) => id !== materialId)
+        : [...current, materialId],
+    );
+  }
+
+  async function saveComposition(deliveryId: string) {
+    setIsSavingComposition(true);
+    setQueueNotice(null);
+
+    try {
+      const response = await fetch(
+        `/api/admin/digest-deliveries/${encodeURIComponent(deliveryId)}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ itemIds: draftItemIds }),
+        },
+      );
+      const body = (await response.json()) as DeliveryDispatchResponse;
+
+      if (!response.ok || !body.data) {
+        throw new Error(body.detail ?? "Не удалось сохранить состав выпуска.");
+      }
+
+      setDeliveries((current) =>
+        current.map((delivery) =>
+          delivery.id === body.data?.id ? body.data : delivery,
+        ),
+      );
+      setEditingDeliveryId(null);
+      setQueueNotice({
+        type: "success",
+        text: `Состав выпуска обновлён: ${body.data.issue.itemCount} новостей.`,
+      });
+    } catch (error) {
+      setQueueNotice({
+        type: "error",
+        text:
+          error instanceof Error
+            ? error.message
+            : "Не удалось сохранить состав выпуска.",
+      });
+    } finally {
+      setIsSavingComposition(false);
+    }
+  }
+
   async function collectNews() {
     setIsCollecting(true);
     setQueueNotice(null);
@@ -481,6 +586,9 @@ export function AdminConsole({
                     delivery.subscriber.telegramConnected ||
                     delivery.status !== "waiting-telegram";
                   const dispatchDone = delivery.status === "sent";
+                  const isEditingComposition =
+                    editingDeliveryId === delivery.id;
+                  const canEditComposition = !dispatchDone && !isSending;
 
                   return (
                     <article className="subscriber-card" key={delivery.id}>
@@ -608,6 +716,115 @@ export function AdminConsole({
                             </li>
                           ))}
                         </ol>
+
+                        <div className="composition-bar">
+                          <span className="composition-origin">
+                            {delivery.issue.curated
+                              ? "Состав собран редактором вручную"
+                              : "Состав собран автоматически по правилу 80/20"}
+                          </span>
+                          {!canEditComposition ? null : isEditingComposition ? (
+                            <span className="composition-actions">
+                              <button
+                                className="button button-signal"
+                                disabled={isSavingComposition}
+                                onClick={() => saveComposition(delivery.id)}
+                                type="button"
+                              >
+                                {isSavingComposition
+                                  ? "Сохраняем…"
+                                  : `Сохранить состав · ${draftItemIds.length}`}
+                              </button>
+                              <button
+                                className="button button-ghost"
+                                disabled={isSavingComposition}
+                                onClick={() => setEditingDeliveryId(null)}
+                                type="button"
+                              >
+                                Отмена
+                              </button>
+                            </span>
+                          ) : (
+                            <button
+                              className="button button-ghost"
+                              onClick={() => startComposition(delivery)}
+                              type="button"
+                            >
+                              Изменить состав
+                            </button>
+                          )}
+                        </div>
+
+                        {isEditingComposition ? (
+                          <div className="composition-picker">
+                            <p className="mono-label">
+                              Выбрано {draftItemIds.length} из{" "}
+                              {approvedMaterials.length} утверждённых · интересы:{" "}
+                              {delivery.subscriber.tags.join(" · ")}
+                            </p>
+                            {approvedMaterials.length === 0 ? (
+                              <p className="panel-note">
+                                Утверждённых материалов пока нет. Утвердите их в
+                                разделе «Материалы».
+                              </p>
+                            ) : (
+                              <ul className="composition-options">
+                                {[...approvedMaterials]
+                                  .sort((left, right) => {
+                                    const leftRank = left.tags.some((tag) =>
+                                      delivery.subscriber.tags.includes(tag),
+                                    )
+                                      ? 0
+                                      : 1;
+                                    const rightRank = right.tags.some((tag) =>
+                                      delivery.subscriber.tags.includes(tag),
+                                    )
+                                      ? 0
+                                      : 1;
+
+                                    if (leftRank !== rightRank) {
+                                      return leftRank - rightRank;
+                                    }
+
+                                    return right.sourcePublishedAt.localeCompare(
+                                      left.sourcePublishedAt,
+                                    );
+                                  })
+                                  .map((material) => {
+                                    const matchesInterests = material.tags.some(
+                                      (tag) =>
+                                        delivery.subscriber.tags.includes(tag),
+                                    );
+
+                                    return (
+                                      <li key={material.id}>
+                                        <label>
+                                          <input
+                                            checked={draftItemIds.includes(
+                                              material.id,
+                                            )}
+                                            onChange={() =>
+                                              toggleDraftItem(material.id)
+                                            }
+                                            type="checkbox"
+                                          />
+                                          <span>
+                                            <strong>{material.title}</strong>
+                                            <em>
+                                              {matchesInterests
+                                                ? "По интересам подписчика"
+                                                : "Общерыночная"}{" "}
+                                              · {material.tags.slice(0, 3).join(" · ")}
+                                            </em>
+                                          </span>
+                                        </label>
+                                      </li>
+                                    );
+                                  })}
+                              </ul>
+                            )}
+                          </div>
+                        ) : null}
                       </div>
                     </article>
                   );
@@ -645,7 +862,64 @@ export function AdminConsole({
                 </div>
               </div>
 
+              <div className="material-filters">
+                <input
+                  aria-label="Поиск по заголовку и тексту"
+                  className="material-filter-search"
+                  onChange={(event) => setMaterialSearch(event.target.value)}
+                  placeholder="Поиск по заголовку или тексту"
+                  type="search"
+                  value={materialSearch}
+                />
+                <select
+                  aria-label="Фильтр по теме"
+                  onChange={(event) => setMaterialTag(event.target.value)}
+                  value={materialTag}
+                >
+                  <option value="">Все темы</option>
+                  {materialTagOptions.map((tag) => (
+                    <option key={tag} value={tag}>
+                      {tag}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  aria-label="Фильтр по источнику"
+                  onChange={(event) => setMaterialSource(event.target.value)}
+                  value={materialSource}
+                >
+                  <option value="">Все источники</option>
+                  {materialSourceOptions.map((source) => (
+                    <option key={source} value={source}>
+                      {source}
+                    </option>
+                  ))}
+                </select>
+                {isMaterialFilterActive ? (
+                  <button
+                    className="material-filter-reset"
+                    onClick={() => {
+                      setMaterialSearch("");
+                      setMaterialTag("");
+                      setMaterialSource("");
+                    }}
+                    type="button"
+                  >
+                    Сбросить
+                  </button>
+                ) : null}
+                <span className="material-filter-count">
+                  Показано {visibleMaterials.length} из {materials.length}
+                </span>
+              </div>
+
               <div className="material-list">
+                {visibleMaterials.length === 0 ? (
+                  <p className="panel-note">
+                    Под фильтр ничего не подошло. Измените запрос, тему или
+                    источник.
+                  </p>
+                ) : null}
                 {visibleMaterials.map((material) => (
                   <article className="material-row" key={material.id}>
                     <span className="material-source">
