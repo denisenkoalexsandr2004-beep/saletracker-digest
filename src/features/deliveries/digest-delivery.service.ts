@@ -342,7 +342,7 @@ export async function setDigestDeliveryItems(
   const items = materialIds
     .map((id) => byId.get(id))
     .filter((material): material is Material => Boolean(material));
-  const selectedTags = new Set(subscription?.tags ?? []);
+  const selectedTags = new Set<string>(subscription?.tags ?? []);
   const personalizedCount = items.filter((item) =>
     item.tags.some((tag) => selectedTags.has(tag)),
   ).length;
