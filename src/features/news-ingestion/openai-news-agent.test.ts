@@ -40,29 +40,31 @@ describe("OpenAI news agent source evidence", () => {
     expect(candidateSchema.properties.sourceUrl).toEqual({ type: "string" });
   });
 
-  it("keeps one run inside the domain budget and rotates across slots", () => {
+  it("fills a run mostly with media and rotates across slots", () => {
     const sources = newsSourceRegistry.filter((source) => source.enabledForAgent);
+    const mediaKinds = new Set(["industry-media", "business-media"]);
     const first = selectRotatedSources(sources, 0);
     const second = selectRotatedSources(sources, 1);
 
     expect(sources.length).toBeGreaterThan(10);
-    expect(first.length).toBeLessThanOrEqual(10);
+    expect(first).toHaveLength(10);
+    // Карточки с проверяемыми цифрами дают издания, поэтому они занимают
+    // большинство мест; регуляторы и пресс-центры идут меньшей долей.
+    expect(
+      first.filter((source) => mediaKinds.has(source.kind)),
+    ).toHaveLength(7);
     expect(first.map((source) => source.id)).not.toEqual(
       second.map((source) => source.id),
     );
-    // Слот повторяется по кругу, а группы вместе покрывают весь реестр.
-    const groups = Math.ceil(sources.length / 10);
+
     const covered = new Set(
-      Array.from({ length: groups }, (_, slot) =>
+      Array.from({ length: 7 }, (_, slot) =>
         selectRotatedSources(sources, slot),
       )
         .flat()
         .map((source) => source.id),
     );
     expect(covered.size).toBe(sources.length);
-    expect(selectRotatedSources(sources, groups).map((s) => s.id)).toEqual(
-      first.map((s) => s.id),
-    );
   });
 
   it("extracts all consulted and cited URLs from a Responses API result", () => {

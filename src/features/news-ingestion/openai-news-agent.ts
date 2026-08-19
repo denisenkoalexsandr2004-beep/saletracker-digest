@@ -19,6 +19,11 @@ import { digestTags } from "@/features/subscriptions/subscription.categories";
 import { env } from "@/shared/config/env";
 
 const MAX_DOMAINS_PER_RUN = 10;
+const MEDIA_PER_RUN = 7;
+const mediaKinds = new Set<NewsSource["kind"]>([
+  "industry-media",
+  "business-media",
+]);
 
 const agentCandidateSchema = z.object({
   title: z.string().trim().min(8).max(180),
@@ -252,13 +257,35 @@ function selectSources(sourceIds?: string[]) {
 /**
  * Веб-поиск деградирует на широком списке доменов: вместо конкретных статей
  * агент выходит на страницы-рубрикаторы, которые проверка прямой ссылки
- * отбраковывает. Замеры: 40 доменов — ноль карточек, 20 — одна, 10 — восемь.
+ * отбраковывает. Замеры на живом API: 40 доменов — ноль карточек, 20 — одна,
+ * 10 — восемь.
  *
- * Поэтому каждый прогон работает со своей группой доменов, а соседние слоты
- * берут следующие группы: за несколько запусков реестр покрывается целиком.
- * Шаг выбирается через прореживание, чтобы в группе оказывались источники
- * разного типа, а не только госорганы подряд.
+ * Важен и состав группы, а не только её размер. Новости с проверяемыми
+ * цифрами дают отраслевые и деловые издания; регуляторы, ассоциации и
+ * корпоративные пресс-центры публикуют редко и в другом формате — группа с их
+ * преобладанием вернула ноль карточек. Поэтому большинство мест в каждом
+ * прогоне занимают медиа, а остальные источники добавляются меньшей долей.
+ *
+ * Соседние часовые слоты сдвигают окно по кругу, так что реестр покрывается
+ * целиком за несколько прогонов.
  */
+function pickWindow<T>(items: T[], count: number, slot: number): T[] {
+  if (!items.length || count <= 0) {
+    return [];
+  }
+
+  if (items.length <= count) {
+    return items;
+  }
+
+  const start =
+    (((Math.trunc(slot) * count) % items.length) + items.length) % items.length;
+  return Array.from(
+    { length: count },
+    (_, offset) => items[(start + offset) % items.length],
+  );
+}
+
 export function selectRotatedSources(
   sources: NewsSource[],
   slot: number,
@@ -268,9 +295,14 @@ export function selectRotatedSources(
     return sources;
   }
 
-  const groups = Math.ceil(sources.length / maxDomains);
-  const index = ((Math.trunc(slot) % groups) + groups) % groups;
-  return sources.filter((_, position) => position % groups === index);
+  const media = sources.filter((source) => mediaKinds.has(source.kind));
+  const others = sources.filter((source) => !mediaKinds.has(source.kind));
+  const mediaCount = Math.min(MEDIA_PER_RUN, maxDomains);
+
+  return [
+    ...pickWindow(media, mediaCount, slot),
+    ...pickWindow(others, maxDomains - mediaCount, slot),
+  ];
 }
 
 export function buildNewsAgentRequest(
