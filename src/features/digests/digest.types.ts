@@ -51,6 +51,7 @@ export interface DigestSelectionInput {
   targetSize: number;
   frequency: DigestFrequency;
   since: string;
+  sourceSince?: string;
   materials: Material[];
   events: CzsEvent[];
   now: string;

@@ -72,6 +72,25 @@ export function getSourceFreshnessStart(
   return start.toISOString();
 }
 
+const welcomeWindowDays = 14;
+
+/**
+ * Первый выпуск после подключения Telegram собирается в расширенном окне:
+ * подписчик приходит в произвольный момент, а редакция утверждает материалы
+ * пачками. С обычным окном частоты такой выпуск почти всегда оказывался пустым.
+ */
+export function getWelcomeFreshnessStart(
+  frequency: DigestFrequency,
+  now: string,
+): string {
+  const start = new Date(now);
+  start.setUTCDate(
+    start.getUTCDate() -
+      Math.max(freshnessWindowDays[frequency], welcomeWindowDays),
+  );
+  return start.toISOString();
+}
+
 function uniqueByStory(materials: Material[]): Material[] {
   const seen = new Set<string>();
 
@@ -141,7 +160,7 @@ export function buildDigestIssue(input: DigestSelectionInput): DigestIssue {
   const selectedTags = new Set(input.tags);
   const approvedAfter = Date.parse(input.since);
   const sourceFreshAfter = Date.parse(
-    getSourceFreshnessStart(input.frequency, input.now),
+    input.sourceSince ?? getSourceFreshnessStart(input.frequency, input.now),
   );
   const latestSourceDate = Date.parse(input.now) + 5 * 60 * 1_000;
   const approved = uniqueByStory(

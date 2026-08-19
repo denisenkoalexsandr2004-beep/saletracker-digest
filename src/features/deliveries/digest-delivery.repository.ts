@@ -5,6 +5,7 @@ import type {
   DigestDeliveryStatus,
   DeliveryMessageCheckpoint,
 } from "@/features/deliveries/digest-delivery.types";
+import type { DigestIssue } from "@/features/digests/digest.types";
 import { getDatabase, type Database } from "@/shared/database/client";
 import {
   deliveryMessages,
@@ -49,6 +50,11 @@ export interface DigestDeliveryRepository {
     id: string,
     updatedAt: string,
   ): RepositoryResult<ClaimDeliveryResult>;
+  replaceIssue(
+    id: string,
+    issue: DigestIssue,
+    updatedAt: string,
+  ): RepositoryResult<DigestDeliveryRecord | null>;
   markSent(
     id: string,
     sentAt: string,
@@ -279,6 +285,14 @@ export class PostgresDigestDeliveryRepository
     return { status: "already-sending", delivery };
   }
 
+  async replaceIssue(
+    id: string,
+    issue: DigestIssue,
+    updatedAt: string,
+  ): Promise<DigestDeliveryRecord | null> {
+    return this.update(id, { issue, updatedAt });
+  }
+
   async markSent(
     id: string,
     sentAt: string,
@@ -472,6 +486,18 @@ export class InMemoryDigestDeliveryRepository
     });
 
     return { status: "claimed", delivery: claimed as DigestDeliveryRecord };
+  }
+
+  replaceIssue(
+    id: string,
+    issue: DigestIssue,
+    updatedAt: string,
+  ): DigestDeliveryRecord | null {
+    const delivery = this.findById(id);
+
+    return delivery
+      ? this.update(id, { issue, status: delivery.status, updatedAt })
+      : null;
   }
 
   markSent(id: string, sentAt: string): DigestDeliveryRecord | null {

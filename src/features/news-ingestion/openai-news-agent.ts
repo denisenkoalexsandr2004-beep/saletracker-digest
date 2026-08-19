@@ -337,7 +337,9 @@ export async function runNewsAgent(
       "Content-Type": "application/json",
     },
     body: JSON.stringify(request.body),
-    signal: AbortSignal.timeout(90_000),
+    // Держимся внутри лимита времени serverless-функции (maxDuration = 60),
+    // чтобы платформа не убивала запрос вместо осмысленной ошибки.
+    signal: AbortSignal.timeout(50_000),
   });
 
   const responseBody = (await response.json()) as RawResponse;

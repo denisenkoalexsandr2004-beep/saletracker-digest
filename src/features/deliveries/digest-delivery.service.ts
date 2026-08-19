@@ -11,6 +11,7 @@ import type {
 import {
   buildDigestIssue,
   getSourceFreshnessStart,
+  getWelcomeFreshnessStart,
 } from "@/features/digests/digest.service";
 import type {
   CzsEvent,
@@ -48,6 +49,7 @@ export class DigestDeliveryError extends Error {
 interface DeliveryPreparationOptions {
   now?: string;
   since?: string;
+  sourceSince?: string;
   issueKey?: string;
   materials?: Material[];
   events?: CzsEvent[];
@@ -67,6 +69,7 @@ function buildIssueForSubscription(
   materials: Material[],
   events: CzsEvent[],
   since = getSourceFreshnessStart(subscription.frequency, now),
+  sourceSince?: string,
 ): DigestIssue {
   return buildDigestIssue({
     role: subscription.role,
@@ -74,6 +77,7 @@ function buildIssueForSubscription(
     targetSize: subscription.targetSize,
     frequency: subscription.frequency,
     since,
+    sourceSince,
     materials,
     events,
     now,
@@ -87,21 +91,38 @@ export async function ensureDigestDelivery(
 ): Promise<DigestDeliveryRecord> {
   const issueKey = options.issueKey ?? `${subscription.id}:first`;
   const existing = await repository.findByIssueKey(issueKey);
+  // Пустой выпуск пересобирается, пока он не ушёл в отправку: подписчик мог
+  // подключить Telegram раньше, чем редакция утвердила первые материалы.
+  const canRebuild =
+    existing !== null &&
+    existing.issue.items.length === 0 &&
+    existing.status !== "sending" &&
+    existing.status !== "sent";
 
-  if (existing) {
+  if (existing && !canRebuild) {
     return existing;
   }
 
   const now = options.now ?? new Date().toISOString();
-  const since =
-    options.since ?? getSourceFreshnessStart(subscription.frequency, now);
+  // Плановая рассылка всегда передаёт `since` явно. Его отсутствие означает
+  // первый выпуск подписчика — он собирается в расширенном окне свежести.
+  const isWelcomeIssue = !options.since;
+  const welcomeStart = getWelcomeFreshnessStart(subscription.frequency, now);
+  const since = options.since ?? welcomeStart;
+  const sourceSince =
+    options.sourceSince ?? (isWelcomeIssue ? welcomeStart : undefined);
   const issue = buildIssueForSubscription(
     subscription,
     now,
     options.materials ?? (isDatabaseConfigured() ? [] : demoMaterials),
     options.events ?? demoEvents,
     since,
+    sourceSince,
   );
+
+  if (existing) {
+    return (await repository.replaceIssue(existing.id, issue, now)) ?? existing;
+  }
 
   return repository.create({
     id: `delivery_${randomUUID()}`,
