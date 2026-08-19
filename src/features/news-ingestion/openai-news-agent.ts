@@ -47,8 +47,10 @@ const agentCandidateSchema = z.object({
   confidence: z.number().min(0).max(1),
 });
 
-const agentResultSchema = z.object({
-  candidates: z.array(agentCandidateSchema).max(12),
+// Карточки проверяются поштучно: одна кривая запись не должна отменять весь
+// ответ вместе с остальными пригодными материалами.
+const agentEnvelopeSchema = z.object({
+  candidates: z.array(z.unknown()).max(12),
 });
 
 export class NewsAgentError extends Error {
@@ -56,6 +58,7 @@ export class NewsAgentError extends Error {
     public readonly code:
       | "OPENAI_NOT_CONFIGURED"
       | "OPENAI_UPSTREAM_ERROR"
+      | "OPENAI_TIMEOUT"
       | "INVALID_AGENT_RESPONSE"
       | "NO_ALLOWED_SOURCES",
     message: string,
@@ -238,6 +241,39 @@ export function wasSourceConsulted(
   );
 }
 
+/**
+ * Подтверждает, что публикация существует.
+ *
+ * Сверка со списком URL, которые вернул веб-поиск, оказалась нерабочей:
+ * агент находит статьи через страницы разделов, поэтому адреса самих
+ * публикаций в `action.sources` не попадают — проверка отбраковывала все
+ * карточки подряд. Прямой запрос решает исходную задачу лучше: он отсекает
+ * выдуманные ссылки не по косвенному признаку, а по факту.
+ */
+export async function isArticleReachable(
+  url: string,
+  timeoutMs = 8_000,
+): Promise<boolean> {
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      redirect: "follow",
+      headers: {
+        // Часть изданий отдаёт 403 на запрос без узнаваемого агента.
+        "user-agent":
+          "Mozilla/5.0 (compatible; SaleTrackerDigestBot/1.0; +https://platforma-czs.ru/)",
+        range: "bytes=0-2048",
+      },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+
+    await response.body?.cancel();
+    return response.status < 400;
+  } catch {
+    return false;
+  }
+}
+
 function isUrlFromAllowedDomain(url: string, domains: string[]): boolean {
   const hostname = new URL(url).hostname.toLowerCase().replace(/^www\./, "");
 
@@ -364,9 +400,18 @@ export function buildNewsAgentRequest(
   } as const;
 }
 
-export async function runNewsAgent(
-  input: RunNewsAgentInput,
-): Promise<{ run: NewsIngestionRun; candidates: NewsCandidate[] }> {
+export interface NewsAgentDiagnostics {
+  returnedByModel: number;
+  accepted: number;
+  consultedUrlCount: number;
+  rejected: Array<{ sourceUrl: string; reasons: string[] }>;
+}
+
+export async function runNewsAgent(input: RunNewsAgentInput): Promise<{
+  run: NewsIngestionRun;
+  candidates: NewsCandidate[];
+  diagnostics: NewsAgentDiagnostics;
+}> {
   if (!env.OPENAI_API_KEY) {
     throw new NewsAgentError(
       "OPENAI_NOT_CONFIGURED",
@@ -396,20 +441,48 @@ export async function runNewsAgent(
       );
   const request = buildNewsAgentRequest(input, sources, startedAt);
 
-  const response = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(request.body),
-    // На Vercel Hobby потолок выполнения — 60 секунд, поэтому по умолчанию
-    // обрываем запрос чуть раньше и отдаём осмысленную ошибку вместо того,
-    // чтобы платформа убила процесс. На своём сервере лимит можно поднять.
-    signal: AbortSignal.timeout(env.NEWS_AGENT_TIMEOUT_MS),
-  });
+  let response: Response;
 
-  const responseBody = (await response.json()) as RawResponse;
+  try {
+    response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(request.body),
+      // На Vercel Hobby потолок выполнения — 60 секунд, поэтому по умолчанию
+      // обрываем запрос чуть раньше и отдаём осмысленную ошибку вместо того,
+      // чтобы платформа убила процесс. На своём сервере лимит можно поднять.
+      signal: AbortSignal.timeout(env.NEWS_AGENT_TIMEOUT_MS),
+    });
+  } catch (error) {
+    // Обрыв по таймауту приходит как TimeoutError/AbortError и раньше уходил
+    // в общий обработчик, где терял причину и превращался в безликую 500.
+    const timedOut =
+      error instanceof Error &&
+      (error.name === "TimeoutError" || error.name === "AbortError");
+
+    throw new NewsAgentError(
+      timedOut ? "OPENAI_TIMEOUT" : "OPENAI_UPSTREAM_ERROR",
+      timedOut
+        ? `Поиск не уложился в ${Math.round(env.NEWS_AGENT_TIMEOUT_MS / 1_000)} с. Сократите число источников или увеличьте NEWS_AGENT_TIMEOUT_MS.`
+        : `Не удалось связаться с OpenAI: ${error instanceof Error ? error.message : "сетевая ошибка"}.`,
+      timedOut ? 504 : 502,
+    );
+  }
+
+  let responseBody: RawResponse;
+
+  try {
+    responseBody = (await response.json()) as RawResponse;
+  } catch {
+    throw new NewsAgentError(
+      "INVALID_AGENT_RESPONSE",
+      `OpenAI вернул ответ без JSON (HTTP ${response.status}).`,
+      502,
+    );
+  }
 
   if (!response.ok) {
     throw new NewsAgentError(
@@ -443,33 +516,98 @@ export async function runNewsAgent(
     );
   }
 
-  const parsed = agentResultSchema.safeParse(parsedJson);
+  const envelope = agentEnvelopeSchema.safeParse(parsedJson);
 
-  if (!parsed.success) {
+  if (!envelope.success) {
     throw new NewsAgentError(
       "INVALID_AGENT_RESPONSE",
-      "Карточки AI-агента не прошли проверку полей.",
+      "Ответ агента не содержит списка карточек.",
       502,
     );
   }
 
+  const validated = envelope.data.candidates.map((raw) => ({
+    raw,
+    result: agentCandidateSchema.safeParse(raw),
+  }));
+  const schemaRejections = validated.flatMap(({ raw, result }) =>
+    result.success
+      ? []
+      : [
+          {
+            sourceUrl:
+              typeof (raw as { sourceUrl?: unknown })?.sourceUrl === "string"
+                ? ((raw as { sourceUrl: string }).sourceUrl)
+                : "—",
+            reasons: result.error.issues
+              .slice(0, 5)
+              .map((issue) => `schema:${issue.path.join(".") || "?"}`),
+          },
+        ],
+  );
+
+  if (schemaRejections.length) {
+    console.info(
+      "[news-agent] карточки не прошли проверку полей:",
+      JSON.stringify(schemaRejections),
+    );
+  }
+
   const collectedAt = new Date().toISOString();
-  const candidates = parsed.data.candidates
-    .map((candidate) => ({
-      candidate,
-      quality: checkCandidateQuality(
+  // Каждая проверка оценивается отдельно, чтобы отказ можно было объяснить.
+  // Раньше отбракованные карточки исчезали молча, и пустой результат было
+  // невозможно отличить от «агент ничего не нашёл».
+  const evaluated = await Promise.all(
+    validated
+      .flatMap(({ result }) => (result.success ? [result.data] : []))
+      .map(async (candidate) => {
+      const quality = checkCandidateQuality(
         candidate,
         sources,
         request.dateFrom,
         collectedAt,
-      ),
-    }))
-    .filter(
-      ({ candidate, quality }) =>
-        quality.accepted &&
-        isUrlFromAllowedDomain(candidate.sourceUrl, request.allowedDomains) &&
-        wasSourceConsulted(candidate.sourceUrl, consultedUrls),
-    )
+      );
+      const reasons = [...quality.reasons];
+
+      if (
+        !isUrlFromAllowedDomain(candidate.sourceUrl, request.allowedDomains)
+      ) {
+        reasons.push("domain-not-allowed");
+      }
+
+      // Ссылка, которую поиск действительно открывал, в подтверждении не
+      // нуждается; остальные проверяем запросом к самой публикации.
+      if (
+        !wasSourceConsulted(candidate.sourceUrl, consultedUrls) &&
+        !(await isArticleReachable(candidate.sourceUrl))
+      ) {
+        reasons.push("article-unreachable");
+      }
+
+        return { candidate, quality, reasons };
+      }),
+  );
+
+  const rejected = [
+    ...schemaRejections,
+    ...evaluated
+      .filter((item) => item.reasons.length > 0)
+      .map((item) => ({
+        sourceUrl: item.candidate.sourceUrl,
+        reasons: item.reasons,
+      })),
+  ];
+
+  if (rejected.length) {
+    console.info(
+      "[news-agent] отклонено карточек:",
+      rejected.length,
+      JSON.stringify(rejected),
+    );
+  }
+
+  const candidates = evaluated
+    .filter((item) => item.reasons.length === 0)
     .slice(0, input.maxCandidates)
     .map<NewsCandidate>(({ candidate, quality }) => ({
       ...candidate,
@@ -492,7 +630,16 @@ export async function runNewsAgent(
 
   await getNewsCandidateRepository().saveRun(run, candidates);
 
-  return { run, candidates };
+  return {
+    run,
+    candidates,
+    diagnostics: {
+      returnedByModel: envelope.data.candidates.length,
+      accepted: candidates.length,
+      consultedUrlCount: consultedUrls.length,
+      rejected,
+    },
+  };
 }
 
 export function getNewsAgentConfiguration() {

@@ -46,9 +46,18 @@ export async function POST(request: Request) {
 
   try {
     const result = await runNewsAgent(input.data);
+    const { diagnostics } = result;
+    const rejectionSummary = [
+      ...new Set(diagnostics.rejected.flatMap((item) => item.reasons)),
+    ].join(", ");
+
     return NextResponse.json({
       data: result,
-      message: `Собрано кандидатов: ${result.candidates.length}. Все ждут редакторской проверки.`,
+      message: diagnostics.accepted
+        ? `Собрано кандидатов: ${diagnostics.accepted}. Все ждут редакторской проверки.`
+        : diagnostics.returnedByModel
+          ? `Агент нашёл ${diagnostics.returnedByModel}, но проверку не прошёл никто. Причины: ${rejectionSummary}.`
+          : "Агент не нашёл материалов по этой группе источников.",
     });
   } catch (error) {
     if (error instanceof NewsAgentError) {
@@ -62,11 +71,19 @@ export async function POST(request: Request) {
       );
     }
 
+    // Раньше причина терялась здесь целиком, и в админке оставался безликий
+    // текст. Эндпоинт закрыт сессией редактора, поэтому подробность безопасна.
+    console.error("[ingestion-runs] unexpected failure", error);
+
     return NextResponse.json(
       {
         title: "INTERNAL_ERROR",
         status: 500,
-        detail: "Не удалось запустить сбор новостей.",
+        detail: `Не удалось запустить сбор новостей. ${
+          error instanceof Error
+            ? `${error.name}: ${error.message}`
+            : "Неизвестная ошибка."
+        }`,
       },
       { status: 500 },
     );
