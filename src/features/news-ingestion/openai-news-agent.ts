@@ -75,6 +75,12 @@ export interface RunNewsAgentInput {
   days: number;
   maxCandidates: number;
   sourceIds?: string[];
+  /**
+   * Номер группы источников. Один запрос охватывает часть реестра, поэтому
+   * полный обход собирается из нескольких вызовов подряд — так каждый из них
+   * укладывается в лимит времени serverless-функции.
+   */
+  groupOffset?: number;
 }
 
 interface RawResponse {
@@ -658,7 +664,10 @@ export async function runNewsAgent(input: RunNewsAgentInput): Promise<{
 
     const sources = explicitSelection
       ? available
-      : selectRotatedSources(available, baseSlot + attempts);
+      : selectRotatedSources(
+          available,
+          baseSlot + attempts + (input.groupOffset ?? 0),
+        );
     sourceCount = sources.length;
 
     const current = await collectCandidatesOnce(
@@ -707,10 +716,15 @@ export async function runNewsAgent(input: RunNewsAgentInput): Promise<{
 }
 
 export function getNewsAgentConfiguration() {
+  const enabledSourceCount = getAgentSources().length;
+
   return {
     configured: Boolean(env.OPENAI_API_KEY),
     model: env.OPENAI_NEWS_MODEL,
-    enabledSourceCount: getAgentSources().length,
+    enabledSourceCount,
     totalSourceCount: newsSourceRegistry.length,
+    // Полный обход реестра складывается из такого числа последовательных
+    // запросов: один запрос охватывает не больше MAX_DOMAINS_PER_RUN доменов.
+    groupCount: Math.max(1, Math.ceil(enabledSourceCount / MAX_DOMAINS_PER_RUN)),
   };
 }

@@ -29,6 +29,7 @@ interface AdminConsoleProps {
     model: string;
     enabledSourceCount: number;
     totalSourceCount: number;
+    groupCount: number;
   };
   events: CzsEvent[];
 }
@@ -76,6 +77,11 @@ interface TelegramSynchronizationResponse {
 interface IngestionResponse {
   data?: {
     candidates: NewsCandidate[];
+    diagnostics?: {
+      returnedByModel: number;
+      accepted: number;
+      rejected: Array<{ sourceUrl: string; reasons: string[] }>;
+    };
   };
   detail?: string;
   message?: string;
@@ -113,6 +119,10 @@ export function AdminConsole({
   const [sendingId, setSendingId] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isCollecting, setIsCollecting] = useState(false);
+  const [collectProgress, setCollectProgress] = useState<{
+    group: number;
+    total: number;
+  } | null>(null);
   const [promotingId, setPromotingId] = useState<string | null>(null);
   const [materialSearch, setMaterialSearch] = useState("");
   const [materialTag, setMaterialTag] = useState("");
@@ -421,42 +431,82 @@ export function AdminConsole({
     setIsCollecting(true);
     setQueueNotice(null);
 
-    try {
-      const response = await fetch("/api/admin/ingestion-runs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ days: 7, maxCandidates: 8 }),
-      });
-      const body = (await response.json()) as IngestionResponse;
+    // Один запрос охватывает часть реестра, поэтому полный обход собирается
+    // из нескольких вызовов подряд: каждый укладывается в лимит времени
+    // функции, а вместе они проходят по всем источникам.
+    const totalGroups = Math.max(1, agentConfiguration.groupCount);
+    const collected: NewsCandidate[] = [];
+    const failures: string[] = [];
+    let returnedByModel = 0;
+    const rejectionReasons = new Set<string>();
 
-      if (!response.ok || !body.data) {
-        throw new Error(body.detail ?? "Не удалось запустить AI-сбор.");
+    try {
+      for (let group = 0; group < totalGroups; group += 1) {
+        setCollectProgress({ group: group + 1, total: totalGroups });
+
+        try {
+          const response = await fetch("/api/admin/ingestion-runs", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              days: 7,
+              maxCandidates: 8,
+              groupOffset: group,
+            }),
+          });
+          const body = (await response.json()) as IngestionResponse;
+
+          if (!response.ok || !body.data) {
+            throw new Error(body.detail ?? "Не удалось запустить AI-сбор.");
+          }
+
+          collected.push(...body.data.candidates);
+          returnedByModel += body.data.diagnostics?.returnedByModel ?? 0;
+          for (const item of body.data.diagnostics?.rejected ?? []) {
+            for (const reason of item.reasons) {
+              rejectionReasons.add(reason);
+            }
+          }
+        } catch (error) {
+          // Неудача одной группы не должна прерывать обход остальных.
+          failures.push(
+            error instanceof Error ? error.message : "неизвестная ошибка",
+          );
+        }
       }
 
-      setCandidates((current) => {
-        const knownUrls = new Set(current.map((item) => item.sourceUrl));
-        return [
-          ...body.data!.candidates.filter(
+      if (collected.length) {
+        setCandidates((current) => {
+          const knownUrls = new Set(current.map((item) => item.sourceUrl));
+          const fresh = collected.filter(
             (item) => !knownUrls.has(item.sourceUrl),
-          ),
-          ...current,
-        ];
-      });
-      setQueueNotice({
-        type: "success",
-        text:
-          body.message ??
-          `Собрано кандидатов: ${body.data.candidates.length}.`,
-      });
-    } catch (error) {
-      setQueueNotice({
-        type: "error",
-        text:
-          error instanceof Error
-            ? error.message
-            : "Не удалось запустить AI-сбор.",
-      });
+          );
+          return [...fresh, ...current];
+        });
+      }
+
+      const failureNote = failures.length
+        ? ` Групп с ошибкой: ${failures.length} (${failures[0]}).`
+        : "";
+
+      if (collected.length) {
+        setQueueNotice({
+          type: failures.length ? "error" : "success",
+          text: `Обойдено групп источников: ${totalGroups}. Собрано кандидатов: ${collected.length}.${failureNote}`,
+        });
+      } else if (returnedByModel) {
+        setQueueNotice({
+          type: "error",
+          text: `Агент нашёл ${returnedByModel}, но проверку не прошёл никто. Причины: ${[...rejectionReasons].join(", ")}.${failureNote}`,
+        });
+      } else {
+        setQueueNotice({
+          type: "error",
+          text: `Обойдено групп источников: ${totalGroups}, свежих материалов не найдено.${failureNote}`,
+        });
+      }
     } finally {
+      setCollectProgress(null);
       setIsCollecting(false);
     }
   }
@@ -1054,7 +1104,11 @@ export function AdminConsole({
                   onClick={collectNews}
                   type="button"
                 >
-                  {isCollecting ? "Агент исследует…" : "Собрать реальные новости"}
+                  {isCollecting
+                    ? collectProgress
+                      ? `Группа ${collectProgress.group} из ${collectProgress.total}…`
+                      : "Агент исследует…"
+                    : `Собрать новости по всем источникам · ${agentConfiguration.enabledSourceCount}`}
                 </button>
               </div>
             </section>

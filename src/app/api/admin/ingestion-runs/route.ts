@@ -14,6 +14,7 @@ const inputSchema = z.object({
   days: z.number().int().min(1).max(31).default(7),
   maxCandidates: z.number().int().min(1).max(12).default(8),
   sourceIds: z.array(z.string().trim().min(1)).max(100).optional(),
+  groupOffset: z.number().int().min(0).max(20).optional(),
 });
 
 export async function POST(request: Request) {
