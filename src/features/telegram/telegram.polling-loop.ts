@@ -3,6 +3,7 @@ import { getTelegramClient } from "@/features/telegram/telegram.runtime";
 
 const LONG_POLL_TIMEOUT_SECONDS = 25;
 const POLLING_RETRY_DELAY_MS = 1_000;
+const WEBHOOK_RECHECK_DELAY_MS = 60_000;
 
 interface TelegramPollingLoopState {
   running: boolean;
@@ -59,13 +60,16 @@ export function startTelegramPollingLoop(): void {
         timeoutSeconds: LONG_POLL_TIMEOUT_SECONDS,
       });
       globalThis.saleTrackerTelegramPollingLoopState = {
-        running: result.mode === "polling",
+        running: true,
         mode: result.mode,
         lastRunAt: new Date().toISOString(),
       };
 
       if (result.mode === "webhook") {
-        return;
+        // Webhook мог быть снят администратором уже после старта процесса.
+        // Раньше цикл здесь завершался навсегда и требовал перезапуска сервиса,
+        // теперь он просто перепроверяет режим через паузу.
+        nextDelayMs = WEBHOOK_RECHECK_DELAY_MS;
       }
     } catch (error) {
       nextDelayMs = POLLING_RETRY_DELAY_MS;

@@ -120,6 +120,12 @@ export class TelegramClient implements TelegramGateway {
     });
   }
 
+  async deleteWebhook(): Promise<void> {
+    // Снимается при переходе на long polling: пока webhook зарегистрирован,
+    // Telegram отдаёт обновления только ему, а getUpdates возвращает ошибку.
+    await this.call<boolean>("deleteWebhook", { drop_pending_updates: false });
+  }
+
   async getWebhookInfo(): Promise<TelegramWebhookInfo> {
     return this.call<TelegramWebhookInfo>("getWebhookInfo");
   }

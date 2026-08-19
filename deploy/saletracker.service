@@ -11,7 +11,10 @@ Type=simple
 User=saletracker
 WorkingDirectory=/srv/saletracker
 EnvironmentFile=/srv/saletracker/.env.production
-ExecStart=/usr/bin/node node_modules/.bin/next start --port 3000
+# --use-env-proxy направляет ВСЕ исходящие запросы Node (Telegram, OpenAI)
+# через прокси из HTTPS_PROXY. Нужен, когда сервер стоит на российском IP.
+# Без переменной HTTPS_PROXY флаг не делает ничего и запросы идут напрямую.
+ExecStart=/usr/bin/node --use-env-proxy node_modules/.bin/next start --port 3000
 Restart=always
 RestartSec=5
 KillSignal=SIGTERM
@@ -19,6 +22,7 @@ TimeoutStopSec=30
 
 # Постоянный процесс переживает отправку многочастного дайджеста целиком,
 # поэтому лимиты времени выполнения, обязательные в serverless, здесь не нужны.
+# Он же держит цикл long polling, который в serverless умирал сразу после ответа.
 
 NoNewPrivileges=true
 PrivateTmp=true
