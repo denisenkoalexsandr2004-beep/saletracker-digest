@@ -27,6 +27,18 @@ describe("OpenAI news agent source evidence", () => {
     );
   });
 
+  it("uses only Structured Outputs keywords supported by the Responses API", () => {
+    const request = buildNewsAgentRequest(
+      { days: 2, maxCandidates: 8 },
+      newsSourceRegistry.slice(0, 2),
+      "2026-08-14T09:00:00.000Z",
+    );
+    const candidateSchema =
+      request.body.text.format.schema.properties.candidates.items;
+
+    expect(candidateSchema.properties.sourceUrl).toEqual({ type: "string" });
+  });
+
   it("extracts all consulted and cited URLs from a Responses API result", () => {
     const urls = extractWebSearchSourceUrls({
       output: [

@@ -100,7 +100,7 @@ const outputSchema = {
         properties: {
           title: { type: "string" },
           sourceName: { type: "string" },
-          sourceUrl: { type: "string", format: "uri" },
+          sourceUrl: { type: "string" },
           publishedAt: { type: "string" },
           summary: { type: "string" },
           marketImpact: { type: "string" },
