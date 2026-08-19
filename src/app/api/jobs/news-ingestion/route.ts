@@ -2,10 +2,8 @@ import { NextResponse } from "next/server";
 
 import { requireCronRequest } from "@/features/jobs/cron-auth";
 import { runIdempotentJob } from "@/features/jobs/job-run.service";
-import {
-  NewsAgentError,
-  runNewsAgent,
-} from "@/features/news-ingestion/openai-news-agent";
+import { NewsAgentError } from "@/features/news-ingestion/openai-news-agent";
+import { runFeedIngestion } from "@/features/news-ingestion/rss-ingestion";
 import { isDatabaseConfigured } from "@/shared/database/client";
 
 export const dynamic = "force-dynamic";
@@ -37,15 +35,15 @@ export async function POST(request: Request) {
     const result = await runIdempotentJob({
       kind: "news-ingestion",
       idempotencyKey: `news-ingestion:${hourSlot}`,
-      // Окно шире часового интервала намеренно: за два дня по одной группе
-      // доменов публикаций может не оказаться вовсе. Повторные находки не
-      // копятся — адрес публикации в базе уникален.
+      // Разбор идёт по лентам: они отдают все публикации за период, тогда как
+      // веб-поиск возвращал выборку и часто вовсе ничего.
       payload: { days: 5, maxCandidates: 12 },
       execute: async () => {
-        const ingestion = await runNewsAgent({ days: 5, maxCandidates: 12 });
+        const ingestion = await runFeedIngestion({ days: 5, maxCandidates: 12 });
         return {
           runId: ingestion.run.id,
           candidateCount: ingestion.candidates.length,
+          entriesFound: ingestion.diagnostics.entriesFound,
         };
       },
     });

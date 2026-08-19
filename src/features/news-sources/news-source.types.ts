@@ -22,6 +22,11 @@ export interface NewsSource {
   kind: NewsSourceKind;
   collectionMode: NewsSourceCollectionMode;
   priority: 1 | 2 | 3;
+  /**
+   * Адрес RSS/Atom-ленты, если издание её публикует. Лента отдаёт все
+   * материалы за период целиком, тогда как веб-поиск возвращает выборку.
+   */
+  feedUrl?: string;
   topics: string[];
   note: string;
   enabledForAgent: boolean;

@@ -78,8 +78,9 @@ interface IngestionResponse {
   data?: {
     candidates: NewsCandidate[];
     diagnostics?: {
-      returnedByModel: number;
       accepted: number;
+      entriesFound?: number;
+      entriesReviewed?: number;
       rejected: Array<{ sourceUrl: string; reasons: string[] }>;
     };
   };
@@ -431,44 +432,55 @@ export function AdminConsole({
     setIsCollecting(true);
     setQueueNotice(null);
 
-    // Один запрос охватывает часть реестра, поэтому полный обход собирается
-    // из нескольких вызовов подряд: каждый укладывается в лимит времени
-    // функции, а вместе они проходят по всем источникам.
-    const totalGroups = Math.max(1, agentConfiguration.groupCount);
+    // Ленты отдают все публикации за период, но разбор идёт порциями: каждая
+    // укладывается в лимит времени функции, а вместе они проходят весь поток.
+    const batches = 3;
+    const batchSize = 25;
     const collected: NewsCandidate[] = [];
     const failures: string[] = [];
-    let returnedByModel = 0;
     const rejectionReasons = new Set<string>();
+    let entriesFound = 0;
+    let entriesReviewed = 0;
 
     try {
-      for (let group = 0; group < totalGroups; group += 1) {
-        setCollectProgress({ group: group + 1, total: totalGroups });
+      for (let batch = 0; batch < batches; batch += 1) {
+        setCollectProgress({ group: batch + 1, total: batches });
 
         try {
           const response = await fetch("/api/admin/ingestion-runs", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              days: 7,
-              maxCandidates: 8,
-              groupOffset: group,
+              mode: "feeds",
+              days: 5,
+              maxCandidates: 12,
+              entryOffset: batch * batchSize,
             }),
           });
           const body = (await response.json()) as IngestionResponse;
 
           if (!response.ok || !body.data) {
-            throw new Error(body.detail ?? "Не удалось запустить AI-сбор.");
+            throw new Error(body.detail ?? "Не удалось разобрать публикации.");
           }
 
           collected.push(...body.data.candidates);
-          returnedByModel += body.data.diagnostics?.returnedByModel ?? 0;
+          entriesFound = Math.max(
+            entriesFound,
+            body.data.diagnostics?.entriesFound ?? 0,
+          );
+          entriesReviewed += body.data.diagnostics?.entriesReviewed ?? 0;
           for (const item of body.data.diagnostics?.rejected ?? []) {
             for (const reason of item.reasons) {
               rejectionReasons.add(reason);
             }
           }
+
+          // Порция пришла пустой — значит свежие публикации кончились.
+          if (!body.data.diagnostics?.entriesReviewed) {
+            break;
+          }
         } catch (error) {
-          // Неудача одной группы не должна прерывать обход остальных.
+          // Сбой одной порции не должен прерывать разбор остальных.
           failures.push(
             error instanceof Error ? error.message : "неизвестная ошибка",
           );
@@ -486,25 +498,15 @@ export function AdminConsole({
       }
 
       const failureNote = failures.length
-        ? ` Групп с ошибкой: ${failures.length} (${failures[0]}).`
+        ? ` Порций с ошибкой: ${failures.length} (${failures[0]}).`
         : "";
 
-      if (collected.length) {
-        setQueueNotice({
-          type: failures.length ? "error" : "success",
-          text: `Обойдено групп источников: ${totalGroups}. Собрано кандидатов: ${collected.length}.${failureNote}`,
-        });
-      } else if (returnedByModel) {
-        setQueueNotice({
-          type: "error",
-          text: `Агент нашёл ${returnedByModel}, но проверку не прошёл никто. Причины: ${[...rejectionReasons].join(", ")}.${failureNote}`,
-        });
-      } else {
-        setQueueNotice({
-          type: "error",
-          text: `Обойдено групп источников: ${totalGroups}, свежих материалов не найдено.${failureNote}`,
-        });
-      }
+      setQueueNotice({
+        type: collected.length && !failures.length ? "success" : "error",
+        text: collected.length
+          ? `Публикаций в лентах: ${entriesFound}, разобрано ${entriesReviewed}. Собрано кандидатов: ${collected.length}.${failureNote}`
+          : `Разобрано публикаций: ${entriesReviewed}, ни одна не прошла проверку.${rejectionReasons.size ? ` Причины: ${[...rejectionReasons].join(", ")}.` : ""}${failureNote}`,
+      });
     } finally {
       setCollectProgress(null);
       setIsCollecting(false);
@@ -1106,9 +1108,9 @@ export function AdminConsole({
                 >
                   {isCollecting
                     ? collectProgress
-                      ? `Группа ${collectProgress.group} из ${collectProgress.total}…`
-                      : "Агент исследует…"
-                    : `Собрать новости по всем источникам · ${agentConfiguration.enabledSourceCount}`}
+                      ? `Разбираем порцию ${collectProgress.group} из ${collectProgress.total}…`
+                      : "Читаем ленты…"
+                    : "Собрать новости из лент"}
                 </button>
               </div>
             </section>

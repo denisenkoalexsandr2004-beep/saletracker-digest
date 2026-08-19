@@ -6,6 +6,7 @@ import {
   NewsAgentError,
   runNewsAgent,
 } from "@/features/news-ingestion/openai-news-agent";
+import { runFeedIngestion } from "@/features/news-ingestion/rss-ingestion";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -15,6 +16,10 @@ const inputSchema = z.object({
   maxCandidates: z.number().int().min(1).max(12).default(8),
   sourceIds: z.array(z.string().trim().min(1)).max(100).optional(),
   groupOffset: z.number().int().min(0).max(20).optional(),
+  entryOffset: z.number().int().min(0).max(500).optional(),
+  // Ленты отдают все публикации за период, поиск — выборку. Основным режимом
+  // работают ленты, поиск остаётся для источников без них.
+  mode: z.enum(["feeds", "search"]).default("feeds"),
 });
 
 export async function POST(request: Request) {
@@ -46,6 +51,23 @@ export async function POST(request: Request) {
   }
 
   try {
+    if (input.data.mode === "feeds") {
+      const result = await runFeedIngestion(input.data);
+      const { diagnostics } = result;
+      const rejectionSummary = [
+        ...new Set(diagnostics.rejected.flatMap((item) => item.reasons)),
+      ].join(", ");
+
+      return NextResponse.json({
+        data: result,
+        message: diagnostics.accepted
+          ? `Разобрано публикаций: ${diagnostics.entriesReviewed} из ${diagnostics.entriesFound}. Собрано кандидатов: ${diagnostics.accepted}.`
+          : diagnostics.entriesReviewed
+            ? `Разобрано публикаций: ${diagnostics.entriesReviewed}, ни одна не прошла проверку.${rejectionSummary ? ` Причины: ${rejectionSummary}.` : ""}`
+            : "Свежих публикаций в лентах не осталось.",
+      });
+    }
+
     const result = await runNewsAgent(input.data);
     const { diagnostics } = result;
     const rejectionSummary = [
