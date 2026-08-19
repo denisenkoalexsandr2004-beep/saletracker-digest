@@ -117,3 +117,7 @@ AI-агенте и свежих данных. Локальный демореж�
 
 Пошаговое создание и подключение бота описано в
 [docs/TELEGRAM-SETUP.md](docs/TELEGRAM-SETUP.md).
+
+Перенос на собственный сервер с постоянным Node-процессом — в
+[docs/SERVER-MIGRATION.md](docs/SERVER-MIGRATION.md). Готовые unit-файл,
+конфигурация nginx, crontab и скрипт выкатки лежат в каталоге `deploy/`.
