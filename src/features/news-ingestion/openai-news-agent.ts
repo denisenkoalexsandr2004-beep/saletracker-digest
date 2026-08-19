@@ -19,6 +19,8 @@ import { digestTags } from "@/features/subscriptions/subscription.categories";
 import { env } from "@/shared/config/env";
 
 const MAX_DOMAINS_PER_RUN = 10;
+const MAX_AGENT_ATTEMPTS = 2;
+const MIN_ATTEMPT_BUDGET_MS = 20_000;
 const MEDIA_PER_RUN = 7;
 const mediaKinds = new Set<NewsSource["kind"]>([
   "industry-media",
@@ -383,6 +385,8 @@ export function buildNewsAgentRequest(
             `Найдите до ${input.maxCandidates} наиболее значимых материалов, опубликованных не раньше ${dateFrom.toISOString()} и не позже текущего времени.`,
             "Приоритет: выручка, цены, маржа, комиссии, инвестиции, объемы производства и продаж, логистика, доля рынка, изменения требований сетей.",
             "Верните прямой URL конкретной статьи, которую вы действительно открыли в ходе поиска, а не главной страницы или поисковой выдачи.",
+            "Проверьте несколько доменов из списка, а не один: если по домену нет свежих публикаций, переходите к следующему.",
+            "Пустой список возвращайте только тогда, когда подходящих публикаций нет ни по одному домену.",
             "Пишите summary, marketImpact и businessImpact по-русски, кратко, профессионально и без шаблонной формулы «что это значит для денег».",
             `Используйте только релевантные теги из каталога SaleTracker: ${digestTags.join(", ")}.`,
           ].join("\n"),
@@ -404,43 +408,24 @@ export interface NewsAgentDiagnostics {
   returnedByModel: number;
   accepted: number;
   consultedUrlCount: number;
+  attempts: number;
   rejected: Array<{ sourceUrl: string; reasons: string[] }>;
 }
 
-export async function runNewsAgent(input: RunNewsAgentInput): Promise<{
-  run: NewsIngestionRun;
-  candidates: NewsCandidate[];
-  diagnostics: NewsAgentDiagnostics;
-}> {
-  if (!env.OPENAI_API_KEY) {
-    throw new NewsAgentError(
-      "OPENAI_NOT_CONFIGURED",
-      "Добавьте OPENAI_API_KEY в .env.local, чтобы запустить сбор реальных новостей.",
-      503,
-    );
-  }
+interface AttemptOutcome {
+  accepted: NewsCandidate[];
+  rejected: Array<{ sourceUrl: string; reasons: string[] }>;
+  returnedByModel: number;
+  consultedUrlCount: number;
+}
 
-  const available = selectSources(input.sourceIds);
-
-  if (!available.length) {
-    throw new NewsAgentError(
-      "NO_ALLOWED_SOURCES",
-      "Не выбрано ни одного разрешённого источника.",
-      422,
-    );
-  }
-
-  const startedAt = new Date().toISOString();
-  // Явно выбранные редактором источники используются целиком, автоматический
-  // прогон берёт очередную группу — слот меняется раз в час.
-  const sources = input.sourceIds?.length
-    ? available
-    : selectRotatedSources(
-        available,
-        Math.floor(Date.parse(startedAt) / 3_600_000),
-      );
-  const request = buildNewsAgentRequest(input, sources, startedAt);
-
+async function collectCandidatesOnce(
+  input: RunNewsAgentInput,
+  sources: NewsSource[],
+  now: string,
+  timeoutMs: number,
+): Promise<AttemptOutcome> {
+  const request = buildNewsAgentRequest(input, sources, now);
   let response: Response;
 
   try {
@@ -451,10 +436,7 @@ export async function runNewsAgent(input: RunNewsAgentInput): Promise<{
         "Content-Type": "application/json",
       },
       body: JSON.stringify(request.body),
-      // На Vercel Hobby потолок выполнения — 60 секунд, поэтому по умолчанию
-      // обрываем запрос чуть раньше и отдаём осмысленную ошибку вместо того,
-      // чтобы платформа убила процесс. На своём сервере лимит можно поднять.
-      signal: AbortSignal.timeout(env.NEWS_AGENT_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (error) {
     // Обрыв по таймауту приходит как TimeoutError/AbortError и раньше уходил
@@ -466,7 +448,7 @@ export async function runNewsAgent(input: RunNewsAgentInput): Promise<{
     throw new NewsAgentError(
       timedOut ? "OPENAI_TIMEOUT" : "OPENAI_UPSTREAM_ERROR",
       timedOut
-        ? `Поиск не уложился в ${Math.round(env.NEWS_AGENT_TIMEOUT_MS / 1_000)} с. Сократите число источников или увеличьте NEWS_AGENT_TIMEOUT_MS.`
+        ? `Поиск не уложился в ${Math.round(timeoutMs / 1_000)} с. Сократите число источников или увеличьте NEWS_AGENT_TIMEOUT_MS.`
         : `Не удалось связаться с OpenAI: ${error instanceof Error ? error.message : "сетевая ошибка"}.`,
       timedOut ? 504 : 502,
     );
@@ -537,7 +519,7 @@ export async function runNewsAgent(input: RunNewsAgentInput): Promise<{
           {
             sourceUrl:
               typeof (raw as { sourceUrl?: unknown })?.sourceUrl === "string"
-                ? ((raw as { sourceUrl: string }).sourceUrl)
+                ? (raw as { sourceUrl: string }).sourceUrl
                 : "—",
             reasons: result.error.issues
               .slice(0, 5)
@@ -561,28 +543,28 @@ export async function runNewsAgent(input: RunNewsAgentInput): Promise<{
     validated
       .flatMap(({ result }) => (result.success ? [result.data] : []))
       .map(async (candidate) => {
-      const quality = checkCandidateQuality(
-        candidate,
-        sources,
-        request.dateFrom,
-        collectedAt,
-      );
-      const reasons = [...quality.reasons];
+        const quality = checkCandidateQuality(
+          candidate,
+          sources,
+          request.dateFrom,
+          collectedAt,
+        );
+        const reasons = [...quality.reasons];
 
-      if (
-        !isUrlFromAllowedDomain(candidate.sourceUrl, request.allowedDomains)
-      ) {
-        reasons.push("domain-not-allowed");
-      }
+        if (
+          !isUrlFromAllowedDomain(candidate.sourceUrl, request.allowedDomains)
+        ) {
+          reasons.push("domain-not-allowed");
+        }
 
-      // Ссылка, которую поиск действительно открывал, в подтверждении не
-      // нуждается; остальные проверяем запросом к самой публикации.
-      if (
-        !wasSourceConsulted(candidate.sourceUrl, consultedUrls) &&
-        !(await isArticleReachable(candidate.sourceUrl))
-      ) {
-        reasons.push("article-unreachable");
-      }
+        // Ссылка, которую поиск действительно открывал, в подтверждении не
+        // нуждается; остальные проверяем запросом к самой публикации.
+        if (
+          !wasSourceConsulted(candidate.sourceUrl, consultedUrls) &&
+          !(await isArticleReachable(candidate.sourceUrl))
+        ) {
+          reasons.push("article-unreachable");
+        }
 
         return { candidate, quality, reasons };
       }),
@@ -606,7 +588,7 @@ export async function runNewsAgent(input: RunNewsAgentInput): Promise<{
     );
   }
 
-  const candidates = evaluated
+  const accepted = evaluated
     .filter((item) => item.reasons.length === 0)
     .slice(0, input.maxCandidates)
     .map<NewsCandidate>(({ candidate, quality }) => ({
@@ -619,25 +601,107 @@ export async function runNewsAgent(input: RunNewsAgentInput): Promise<{
       verificationReasons: quality.reasons,
     }));
 
+  return {
+    accepted,
+    rejected,
+    returnedByModel: envelope.data.candidates.length,
+    consultedUrlCount: consultedUrls.length,
+  };
+}
+
+export async function runNewsAgent(input: RunNewsAgentInput): Promise<{
+  run: NewsIngestionRun;
+  candidates: NewsCandidate[];
+  diagnostics: NewsAgentDiagnostics;
+}> {
+  if (!env.OPENAI_API_KEY) {
+    throw new NewsAgentError(
+      "OPENAI_NOT_CONFIGURED",
+      "Добавьте OPENAI_API_KEY в .env.local, чтобы запустить сбор реальных новостей.",
+      503,
+    );
+  }
+
+  const available = selectSources(input.sourceIds);
+
+  if (!available.length) {
+    throw new NewsAgentError(
+      "NO_ALLOWED_SOURCES",
+      "Не выбрано ни одного разрешённого источника.",
+      422,
+    );
+  }
+
+  const startedAt = new Date().toISOString();
+  const deadline = Date.parse(startedAt) + env.NEWS_AGENT_TIMEOUT_MS;
+  const baseSlot = Math.floor(Date.parse(startedAt) / 3_600_000);
+  const explicitSelection = Boolean(input.sourceIds?.length);
+
+  let attempts = 0;
+  let sourceCount = available.length;
+  let outcome: AttemptOutcome = {
+    accepted: [],
+    rejected: [],
+    returnedByModel: 0,
+    consultedUrlCount: 0,
+  };
+
+  // Поиск отвечает неровно: один и тот же запрос то приносит карточки, то
+  // возвращает пустой список. Пустую попытку повторяем по следующей группе
+  // источников, пока хватает бюджета времени.
+  while (attempts < MAX_AGENT_ATTEMPTS) {
+    const remaining = deadline - Date.now();
+
+    if (attempts > 0 && remaining < MIN_ATTEMPT_BUDGET_MS) {
+      break;
+    }
+
+    const sources = explicitSelection
+      ? available
+      : selectRotatedSources(available, baseSlot + attempts);
+    sourceCount = sources.length;
+
+    const current = await collectCandidatesOnce(
+      input,
+      sources,
+      startedAt,
+      Math.max(remaining, MIN_ATTEMPT_BUDGET_MS),
+    );
+
+    attempts += 1;
+    outcome = {
+      accepted: current.accepted,
+      rejected: [...outcome.rejected, ...current.rejected],
+      returnedByModel: outcome.returnedByModel + current.returnedByModel,
+      consultedUrlCount: current.consultedUrlCount,
+    };
+
+    if (current.accepted.length || explicitSelection) {
+      break;
+    }
+  }
+
+  const completedAt = new Date().toISOString();
   const run: NewsIngestionRun = {
     id: `ingestion_${randomUUID()}`,
     startedAt,
-    completedAt: collectedAt,
+    completedAt,
     model: env.OPENAI_NEWS_MODEL,
-    sourceCount: sources.length,
-    candidateCount: candidates.length,
+    sourceCount,
+    candidateCount: outcome.accepted.length,
   };
 
-  await getNewsCandidateRepository().saveRun(run, candidates);
+  await getNewsCandidateRepository().saveRun(run, outcome.accepted);
 
   return {
     run,
-    candidates,
+    candidates: outcome.accepted,
     diagnostics: {
-      returnedByModel: envelope.data.candidates.length,
-      accepted: candidates.length,
-      consultedUrlCount: consultedUrls.length,
-      rejected,
+      returnedByModel: outcome.returnedByModel,
+      accepted: outcome.accepted.length,
+      consultedUrlCount: outcome.consultedUrlCount,
+      attempts,
+      rejected: outcome.rejected,
     },
   };
 }
