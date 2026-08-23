@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { InMemoryDigestDeliveryRepository } from "@/features/deliveries/digest-delivery.repository";
 import {
+  getDigestDispatchRunKey,
   getMoscowSlot,
   getDigestCutoff,
   isDigestDispatchWindow,
@@ -46,6 +47,9 @@ describe("digest schedule", () => {
     expect(isDigestDue("twice-weekly", thursday)).toBe(true);
     expect(isDigestDue("weekly", thursday)).toBe(false);
     expect(getDigestCutoff(firstMonday)).toBe("2026-08-03T08:30:00.000Z");
+    expect(getDigestDispatchRunKey(firstMonday)).toBe(
+      "digest-dispatch:2026-08-03:12:00",
+    );
     expect(isDigestDispatchWindow(firstMonday)).toBe(true);
     expect(
       isDigestDispatchWindow(getMoscowSlot("2026-08-03T11:59:00.000Z")),
@@ -190,5 +194,72 @@ describe("digest schedule", () => {
     expect(result.empty).toBe(1);
     expect(result.sent).toBe(0);
     expect(gateway.messages).toHaveLength(0);
+  });
+
+  it("доставляет 100 выпусков короткими пачками без дублей", async () => {
+    const subscriptions = new InMemorySubscriptionRepository();
+    const deliveries = new InMemoryDigestDeliveryRepository();
+    const gateway = new FakeGateway();
+
+    for (let index = 0; index < 100; index += 1) {
+      subscriptions.create({
+        id: `sub_mass_${index}`,
+        connectionToken: `mass-token-${index}`,
+        createdAt: "2026-07-14T09:00:00.000Z",
+        name: `Получатель ${index}`,
+        company: `Компания ${index}`,
+        email: `mass-${index}@example.ru`,
+        role: "supplier",
+        tags: ["Молочная продукция", "СТМ", "Логистика"],
+        frequency: "weekly",
+        targetSize: 5,
+        consent: true,
+        telegram: {
+          chatId: 10_000 + index,
+          userId: 20_000 + index,
+          firstName: `Получатель ${index}`,
+          connectedAt: "2026-07-14T09:10:00.000Z",
+        },
+      });
+    }
+
+    const dependencies = {
+      gateway,
+      appUrl: "https://digest.example.ru",
+      subscriptions,
+      deliveries,
+      materials: demoMaterials,
+      events: demoEvents,
+      batchSize: 5,
+    };
+    let totalSent = 0;
+
+    for (let invocation = 0; invocation < 20; invocation += 1) {
+      const result = await runScheduledDigestDispatch(
+        new Date(
+          Date.parse("2026-07-27T09:00:00.000Z") +
+            invocation * 5 * 60_000,
+        ).toISOString(),
+        dependencies,
+      );
+      totalSent += result.sent;
+      expect(result.selected).toBe(5);
+      expect(result.remaining).toBe(95 - invocation * 5);
+    }
+
+    const messageCount = gateway.messages.length;
+    const repeated = await runScheduledDigestDispatch(
+      "2026-07-27T11:00:00.000Z",
+      dependencies,
+    );
+
+    expect(totalSent).toBe(100);
+    expect(repeated).toMatchObject({
+      due: 100,
+      selected: 0,
+      remaining: 0,
+      alreadySent: 100,
+    });
+    expect(gateway.messages).toHaveLength(messageCount);
   });
 });

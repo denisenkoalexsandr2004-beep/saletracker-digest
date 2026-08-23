@@ -3,7 +3,7 @@ name: SaleTracker scheduled jobs
 on:
   schedule:
     - cron: "17 * * * *"
-    - cron: "*/10 9-11 * * *"
+    - cron: "*/5 9-11 * * *"
   workflow_dispatch:
     inputs:
       job:
@@ -44,7 +44,7 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' &&
       (inputs.job == 'both' || inputs.job == 'digest-dispatch') ||
-      github.event_name == 'schedule' && github.event.schedule == '*/10 9-11 * * *'
+      github.event_name == 'schedule' && github.event.schedule == '*/5 9-11 * * *'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

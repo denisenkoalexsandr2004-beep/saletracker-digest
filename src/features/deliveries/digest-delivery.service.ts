@@ -51,6 +51,7 @@ interface DeliveryPreparationOptions {
   since?: string;
   sourceSince?: string;
   issueKey?: string;
+  rebuild?: boolean;
   materials?: Material[];
   events?: CzsEvent[];
 }
@@ -95,10 +96,10 @@ export async function ensureDigestDelivery(
   // подключить Telegram раньше, чем редакция утвердила первые материалы.
   const canRebuild =
     existing !== null &&
-    existing.issue.items.length === 0 &&
     !existing.issue.curated &&
     existing.status !== "sending" &&
-    existing.status !== "sent";
+    existing.status !== "sent" &&
+    (existing.issue.items.length === 0 || options.rebuild === true);
 
   if (existing && !canRebuild) {
     return existing;
@@ -183,13 +184,20 @@ export async function markDigestDeliveryReady(
   const materials =
     options.materials ?? (await getMaterialRepository().listApproved());
   const connectedAt = subscription.telegram?.connectedAt ?? now;
+  const existing = await deliveries.findBySubscriptionId(subscription.id);
   const delivery = await ensureDigestDelivery(
     subscription,
     {
       ...options,
       materials,
       now,
-      issueKey: options.issueKey ?? `${subscription.id}:connected:${connectedAt}`,
+      rebuild: true,
+      // A subscription already receives a waiting first issue at form submit.
+      // Reuse it on /start instead of creating a second delivery row.
+      issueKey:
+        options.issueKey ??
+        existing?.issueKey ??
+        `${subscription.id}:connected:${connectedAt}`,
     },
     deliveries,
   );
@@ -298,14 +306,29 @@ export async function listDigestDeliveryViews(
   subscriptions: SubscriptionRepository = getSubscriptionRepository(),
   deliveries: DigestDeliveryRepository = getDigestDeliveryRepository(),
 ): Promise<DigestDeliveryView[]> {
-  const records = await deliveries.list(limit);
+  // Historical databases may contain both `:first` and `:connected` rows from
+  // the old flow. Keep the newest subscriber card and do not let duplicates
+  // crowd other subscribers out of the admin queue.
+  const records = await deliveries.list(100);
+  const latestBySubscription = new Map<string, DigestDeliveryRecord>();
+
+  for (const delivery of records) {
+    if (!latestBySubscription.has(delivery.subscriptionId)) {
+      latestBySubscription.set(delivery.subscriptionId, delivery);
+    }
+  }
+
   const views = await Promise.all(
-    records.map(async (delivery) => {
-      const subscription = await subscriptions.findById(
-        delivery.subscriptionId,
-      );
-      return subscription ? toDigestDeliveryView(delivery, subscription) : null;
-    }),
+    [...latestBySubscription.values()]
+      .slice(0, Math.max(1, Math.min(limit, 100)))
+      .map(async (delivery) => {
+        const subscription = await subscriptions.findById(
+          delivery.subscriptionId,
+        );
+        return subscription
+          ? toDigestDeliveryView(delivery, subscription)
+          : null;
+      }),
   );
   return views.filter((view): view is DigestDeliveryView => Boolean(view));
 }

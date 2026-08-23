@@ -7,5 +7,7 @@ CRON_SECRET_FILE=/srv/saletracker/.cron-secret
 # Сбор новостей — раз в час в :17
 17 * * * * curl -fsS --max-time 300 -X POST -H "Authorization: Bearer $(cat /srv/saletracker/.cron-secret)" https://digest.example.ru/api/jobs/news-ingestion >> /var/log/saletracker-cron.log 2>&1
 
-# Рассылка выпусков — каждые 10 минут в окне 12:00-14:59 МСК (09:00-11:59 UTC)
-*/10 9-11 * * * curl -fsS --max-time 300 -X POST -H "Authorization: Bearer $(cat /srv/saletracker/.cron-secret)" https://digest.example.ru/api/jobs/digest-dispatch >> /var/log/saletracker-cron.log 2>&1
+# Рассылка выпусков — каждые 5 минут в окне 12:00-14:59 МСК (09:00-11:59 UTC).
+# Каждый вызов берёт короткую идемпотентную пачку, поэтому следующий тик
+# продолжает очередь и не дублирует уже отправленные сообщения.
+*/5 9-11 * * * curl -fsS --max-time 120 -X POST -H "Authorization: Bearer $(cat /srv/saletracker/.cron-secret)" https://digest.example.ru/api/jobs/digest-dispatch >> /var/log/saletracker-cron.log 2>&1

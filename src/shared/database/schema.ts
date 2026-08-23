@@ -168,6 +168,101 @@ export const newsCandidates = pgTable(
   ],
 );
 
+/**
+ * Durable inbox between RSS discovery and AI enrichment.
+ *
+ * Discovery is intentionally cheap and idempotent. Workers claim rows from
+ * this table in small batches, so a timeout for one article never rolls back
+ * or repeats the rest of the feed.
+ */
+export const newsArticles = pgTable(
+  "news_articles",
+  {
+    id: text("id").primaryKey(),
+    sourceId: text("source_id").notNull(),
+    sourceName: text("source_name").notNull(),
+    sourceUrl: text("source_url").notNull(),
+    canonicalUrl: text("canonical_url").notNull(),
+    title: text("title").notNull(),
+    summary: text("summary").notNull().default(""),
+    publishedAt: timestamp("published_at", {
+      withTimezone: true,
+      mode: "string",
+    }).notNull(),
+    articleText: text("article_text"),
+    contentHash: text("content_hash"),
+    status: text("status").notNull().default("pending"),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    processingStartedAt: timestamp("processing_started_at", {
+      withTimezone: true,
+      mode: "string",
+    }),
+    nextAttemptAt: timestamp("next_attempt_at", {
+      withTimezone: true,
+      mode: "string",
+    }).notNull(),
+    processedAt: timestamp("processed_at", {
+      withTimezone: true,
+      mode: "string",
+    }),
+    lastError: text("last_error"),
+    rejectionReasons: jsonb("rejection_reasons")
+      .$type<string[]>()
+      .notNull()
+      .default([]),
+    discoveredAt: timestamp("discovered_at", {
+      withTimezone: true,
+      mode: "string",
+    }).notNull(),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("news_articles_canonical_url_uidx").on(table.canonicalUrl),
+    uniqueIndex("news_articles_content_hash_uidx").on(table.contentHash),
+    index("news_articles_status_next_attempt_idx").on(
+      table.status,
+      table.nextAttemptAt,
+    ),
+    index("news_articles_published_idx").on(table.publishedAt),
+  ],
+);
+
+/**
+ * Append-only metering log for every successful response from a news AI.
+ * A separate event table keeps retries and model-filtered articles visible,
+ * instead of attributing cost only to candidates that reached the editor.
+ */
+export const newsAiUsageEvents = pgTable(
+  "news_ai_usage_events",
+  {
+    id: text("id").primaryKey(),
+    newsArticleId: text("news_article_id").references(() => newsArticles.id, {
+      onDelete: "set null",
+    }),
+    providerRequestId: text("provider_request_id"),
+    provider: text("provider").notNull(),
+    model: text("model").notNull(),
+    operation: text("operation").notNull(),
+    inputTokens: integer("input_tokens").notNull().default(0),
+    cachedInputTokens: integer("cached_input_tokens").notNull().default(0),
+    cacheWriteTokens: integer("cache_write_tokens").notNull().default(0),
+    outputTokens: integer("output_tokens").notNull().default(0),
+    reasoningTokens: integer("reasoning_tokens").notNull().default(0),
+    totalTokens: integer("total_tokens").notNull().default(0),
+    costUsdMicros: integer("cost_usd_micros"),
+    costSource: text("cost_source").notNull(),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("news_ai_usage_provider_request_uidx").on(
+      table.provider,
+      table.providerRequestId,
+    ),
+    index("news_ai_usage_created_idx").on(table.createdAt),
+    index("news_ai_usage_article_idx").on(table.newsArticleId),
+  ],
+);
+
 export const materials = pgTable(
   "materials",
   {

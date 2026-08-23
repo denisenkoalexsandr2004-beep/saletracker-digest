@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 
 import { isAdminAuthConfigured } from "@/features/admin/admin-auth";
 import { getMaterialRepository } from "@/features/materials/material.repository";
+import { getNewsArticleQueueRepository } from "@/features/news-ingestion/news-article-queue.repository";
+import { getNewsAiProviderConfiguration } from "@/features/news-ingestion/news-ai-provider";
 import { getNewsCandidateRepository } from "@/features/news-ingestion/news-candidate.repository";
 import { checkDatabase } from "@/shared/database/client";
 import { env } from "@/shared/config/env";
@@ -73,9 +75,35 @@ async function getNewsFreshnessCheck(databaseConfigured: boolean) {
   }
 }
 
+async function getNewsQueueCheck(databaseConfigured: boolean) {
+  if (!databaseConfigured) {
+    return {
+      status: "error",
+      detail: "PostgreSQL is required for the persistent news queue.",
+    };
+  }
+
+  try {
+    const stats = await getNewsArticleQueueRepository().getStats();
+    return {
+      status:
+        stats.deadLetter > 0 || stats.retry > 0 ? "degraded" : "ok",
+      ...stats,
+    };
+  } catch {
+    return {
+      status: "error",
+      detail: "Could not read the persistent news queue.",
+    };
+  }
+}
+
 export async function GET() {
   const database = await checkDatabase();
   const newsFreshness = await getNewsFreshnessCheck(
+    database.configured && database.status === "ok",
+  );
+  const newsQueue = await getNewsQueueCheck(
     database.configured && database.status === "ok",
   );
   const appUrlIsHttps = new URL(env.APP_URL).protocol === "https:";
@@ -88,6 +116,7 @@ export async function GET() {
   const dedicatedAdminAuth = Boolean(
     env.ADMIN_PASSWORD && env.SESSION_SECRET,
   );
+  const newsProvider = getNewsAiProviderConfiguration();
   const checks = {
     database,
     adminAuth: {
@@ -108,9 +137,13 @@ export async function GET() {
       status: env.CRON_SECRET ? "ok" : "error",
     },
     newsAgent: {
-      configured: Boolean(env.OPENAI_API_KEY),
-      status: env.OPENAI_API_KEY ? "ok" : "error",
+      provider: newsProvider.provider,
+      model: newsProvider.model,
+      credentialName: newsProvider.credentialName,
+      configured: newsProvider.configured,
+      status: newsProvider.configured ? "ok" : "error",
     },
+    newsQueue,
     newsFreshness,
   };
   const ready =
@@ -121,6 +154,7 @@ export async function GET() {
     checks.telegram.configured &&
     checks.scheduler.configured &&
     checks.newsAgent.configured &&
+    checks.newsQueue.status !== "error" &&
     checks.newsFreshness.status === "ok";
 
   return NextResponse.json(

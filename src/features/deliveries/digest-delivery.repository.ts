@@ -38,6 +38,9 @@ export interface DigestDeliveryRepository {
   findByIssueKey(
     issueKey: string,
   ): RepositoryResult<DigestDeliveryRecord | null>;
+  findByIssueKeys(
+    issueKeys: string[],
+  ): RepositoryResult<DigestDeliveryRecord[]>;
   findBySubscriptionId(
     subscriptionId: string,
   ): RepositoryResult<DigestDeliveryRecord | null>;
@@ -165,6 +168,18 @@ export class PostgresDigestDeliveryRepository
       .where(eq(digestDeliveries.issueKey, issueKey))
       .limit(1);
     return row ? mapDelivery(row) : null;
+  }
+
+  async findByIssueKeys(issueKeys: string[]): Promise<DigestDeliveryRecord[]> {
+    if (!issueKeys.length) {
+      return [];
+    }
+
+    const rows = await this.db
+      .select()
+      .from(digestDeliveries)
+      .where(inArray(digestDeliveries.issueKey, issueKeys));
+    return rows.map(mapDelivery);
   }
 
   async findBySubscriptionId(
@@ -421,6 +436,13 @@ export class InMemoryDigestDeliveryRepository
       [...this.byId.values()].find(
         (delivery) => delivery.issueKey === issueKey,
       ) ?? null
+    );
+  }
+
+  findByIssueKeys(issueKeys: string[]): DigestDeliveryRecord[] {
+    const allowed = new Set(issueKeys);
+    return [...this.byId.values()].filter((delivery) =>
+      allowed.has(delivery.issueKey),
     );
   }
 

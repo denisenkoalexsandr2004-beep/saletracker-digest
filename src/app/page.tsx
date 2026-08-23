@@ -1,6 +1,5 @@
 import Link from "next/link";
 
-import { SignalBoard } from "@/features/digests/components/signal-board";
 import { digestTags } from "@/features/subscriptions/subscription.categories";
 import { SubscriptionBuilder } from "@/features/subscriptions/components/subscription-builder";
 import { SiteFooter } from "@/shared/components/site-footer";
@@ -9,18 +8,52 @@ import { env } from "@/shared/config/env";
 
 const principles = [
   {
-    title: "Точно по вашей категории",
-    body: "80% выпуска совпадает с выбранными интересами. Остальное — действительно важные сигналы рынка.",
+    title: "Вы выбираете интересы",
+    body: "Роль, категории, частоту и объём выпуска можно настроить за несколько минут.",
   },
   {
-    title: "Сначала проверка, потом отправка",
-    body: "AI собирает и группирует сюжеты, редактор подтверждает факты и утверждает материал один раз.",
+    title: "Система проверяет новости",
+    body: "ИИ собирает и группирует сюжеты, а редактор подтверждает факты перед публикацией.",
   },
   {
-    title: "Не просто читать — действовать",
-    body: "Финальный блок ведёт на подходящее мероприятие ЦЗС для переговоров с нужными партнёрами.",
+    title: "Бот отправляет выпуск",
+    body: "В назначенное время вы получаете короткий дайджест и следующий деловой шаг в Telegram.",
   },
 ] as const;
+
+const metrics = [
+  { value: "80%", label: "новостей по выбранным интересам" },
+  { value: "2×", label: "проверка ключевых фактов" },
+  { value: "12:00", label: "плановая отправка в Telegram" },
+  { value: "5–10", label: "новостей в одном выпуске" },
+] as const;
+
+function SupplierIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 32 32">
+      <path d="M7 12h18l-2 14H9L7 12Z" />
+      <path d="m10 12 2-6h8l2 6M13 17h6" />
+    </svg>
+  );
+}
+
+function BuyerIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 32 32">
+      <path d="M5 7h3l3 14h12l3-10H9" />
+      <circle cx="13" cy="26" r="1.5" />
+      <circle cx="22" cy="26" r="1.5" />
+    </svg>
+  );
+}
+
+function BadgeIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 16 16">
+      <path d="M3.5 13.5h9M5 13.5V7.75h6v5.75M6.5 7.75V4.5h3v3.25M7 10h2M8 4.5V2.5" />
+    </svg>
+  );
+}
 
 export default function HomePage() {
   const telegramBotUrl = env.TELEGRAM_BOT_USERNAME
@@ -30,48 +63,82 @@ export default function HomePage() {
   return (
     <>
       <SiteHeader telegramBotUrl={telegramBotUrl} />
-      <main>
-        <section className="hero">
-          <div className="hero-copy">
-            <p className="eyebrow">Новая опция SaleTracker</p>
-            <h1>
-              Новости рынка, которые ведут <span>к действию.</span>
-            </h1>
-            <p>
-              Персональные дайджесты для поставщиков и закупщиков: только
-              проверенные сигналы по вашим категориям, в Telegram и по
-              понятному расписанию.
+      <main className="marketing-home" id="main-content">
+        <section className="platform-hero">
+          <div className="platform-hero__inner">
+            <p className="platform-badge">
+              <BadgeIcon />
+              Новости для участников рынка
             </p>
-            <div className="hero-actions">
-              <a className="button button-signal" href="#setup">
-                Настроить мой выпуск
-              </a>
-              <Link className="button button-ghost" href="/preview">
-                Посмотреть пример <span aria-hidden="true">↗</span>
-              </Link>
-              {telegramBotUrl ? (
-                <a
-                  className="button button-telegram"
-                  href={telegramBotUrl}
-                  rel="noreferrer"
-                  target="_blank"
-                >
-                  Открыть Telegram-бота ↗
+            <h1>
+              Ваш рынок — <span>в одном персональном дайджесте</span>
+            </h1>
+            <p className="platform-hero__lead">
+              SaleTracker собирает отраслевые новости, проверяет факты и
+              отправляет только важные сигналы по вашим категориям прямо в
+              Telegram.
+            </p>
+
+            <div className="audience-grid">
+              <article className="audience-card audience-card--supplier">
+                <SupplierIcon />
+                <div>
+                  <h2>Я поставщик</h2>
+                  <p>
+                    Хочу следить за спросом сетей, конкурентами и изменениями
+                    в своей товарной категории.
+                  </p>
+                </div>
+                <ul>
+                  <li>Новости по выбранным товарам</li>
+                  <li>Сигналы закупок и логистики</li>
+                  <li>Подходящие мероприятия ЦЗС</li>
+                </ul>
+                <a className="audience-cta" href="#setup">
+                  Настроить для поставщика <span aria-hidden="true">→</span>
                 </a>
-              ) : null}
+              </article>
+
+              <article className="audience-card audience-card--buyer">
+                <BuyerIcon />
+                <div>
+                  <h2>Я торговая сеть</h2>
+                  <p>
+                    Хочу видеть новых поставщиков, тренды ассортимента и
+                    важные изменения рынка.
+                  </p>
+                </div>
+                <ul>
+                  <li>Новости поставщиков и брендов</li>
+                  <li>Категорийные тренды и цены</li>
+                  <li>Только проверенные материалы</li>
+                </ul>
+                <a className="audience-cta" href="#setup">
+                  Настроить для закупщика <span aria-hidden="true">→</span>
+                </a>
+              </article>
             </div>
-            <div className="hero-note">
-              <span className="live-dot" aria-hidden="true" />
-              Редакторская проверка · правило 80/20 · CTA на ЦЗС
-            </div>
+
+            <Link className="platform-preview-link" href="/preview">
+              Посмотреть пример готового выпуска
+              <span aria-hidden="true">→</span>
+            </Link>
           </div>
-          <SignalBoard />
         </section>
 
-        <section className="section">
-          <p className="section-kicker">Что меняется</p>
+        <section className="platform-metrics" aria-label="Параметры дайджеста">
+          {metrics.map((metric) => (
+            <div key={metric.label}>
+              <strong>{metric.value}</strong>
+              <span>{metric.label}</span>
+            </div>
+          ))}
+        </section>
+
+        <section className="section process-section">
+          <p className="section-kicker">Как это работает</p>
           <h2 className="section-heading">
-            Из новостного шума — в рабочий сигнал
+            От интересов до готового выпуска
           </h2>
           <div className="principles-grid">
             {principles.map((principle, index) => (
@@ -88,8 +155,8 @@ export default function HomePage() {
 
         <section className="telegram-connect-section">
           <div>
-            <p className="section-kicker">Подключение Telegram</p>
-            <h2>Бот получает право писать только после вашего Start</h2>
+            <p className="section-kicker">Telegram</p>
+            <h2>Подключите бота одним нажатием Start</h2>
             <p>
               Сначала настройте интересы. Сервис создаст персональную ссылку,
               по которой Telegram откроет бота с защищённым токеном подписки.
@@ -129,9 +196,9 @@ export default function HomePage() {
         <section className="builder-section" id="setup">
           <div className="builder-layout">
             <div className="builder-intro">
-              <p className="section-kicker">Настройка за 2 минуты</p>
+              <p className="section-kicker">Персональная настройка</p>
               <h2 className="section-heading">
-                Соберите свой информационный радар
+                Соберите свой дайджест
               </h2>
               <p className="section-lead">
                 На этапе пилота дайджесты бесплатны. Выберите темы, удобный
@@ -139,9 +206,9 @@ export default function HomePage() {
               </p>
               <div className="builder-meta">
                 <span>Пилотный доступ · бесплатно</span>
-                <span>11:30 · редакционный cutoff</span>
+                <span>11:30 · завершение проверки</span>
                 <span>12:00 · отправка в Telegram</span>
-                <span>100% · утверждённые материалы</span>
+                <span>100% · проверенные материалы</span>
               </div>
             </div>
             <SubscriptionBuilder availableTags={digestTags} />
@@ -150,7 +217,7 @@ export default function HomePage() {
 
         <section className="czs-section">
           <div>
-            <p className="section-kicker">ЦЗС — ядро проекта</p>
+            <p className="section-kicker">Следующий шаг</p>
             <h2>Интерес к категории превращается во встречу</h2>
             <p>
               Дайджест Платформы Сейл Трекер сопоставляет интересы подписчика с

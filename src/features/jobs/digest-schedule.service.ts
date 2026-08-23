@@ -19,8 +19,11 @@ export interface MoscowSlot {
   date: string;
   day: number;
   hour: number;
+  minute: number;
   weekday: "Mon" | "Tue" | "Wed" | "Thu" | "Fri" | "Sat" | "Sun";
 }
+
+const DELIVERY_LEASE_MS = 15 * 60_000;
 
 export function isDigestDispatchWindow(slot: MoscowSlot): boolean {
   return slot.hour >= 12 && slot.hour < 15;
@@ -33,12 +36,16 @@ interface ScheduledDigestDependencies {
   deliveries?: DigestDeliveryRepository;
   materials?: Material[];
   events?: CzsEvent[];
+  batchSize?: number;
 }
 
 export interface ScheduledDigestResult extends Record<string, unknown> {
   slot: string;
   cutoff: string;
   due: number;
+  selected: number;
+  remaining: number;
+  inProgress: number;
   sent: number;
   alreadySent: number;
   empty: number;
@@ -58,6 +65,7 @@ export function getMoscowSlot(value: string): MoscowSlot {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
+    minute: "2-digit",
     hour12: false,
     weekday: "short",
     timeZone: "Europe/Moscow",
@@ -69,8 +77,16 @@ export function getMoscowSlot(value: string): MoscowSlot {
     date: `${part("year")}-${part("month")}-${part("day")}`,
     day: Number(part("day")),
     hour: Number(part("hour")),
+    minute: Number(part("minute")),
     weekday: part("weekday") as MoscowSlot["weekday"],
   };
+}
+
+export function getDigestDispatchRunKey(slot: MoscowSlot): string {
+  const minuteBucket = Math.floor(slot.minute / 5) * 5;
+  const hour = String(slot.hour).padStart(2, "0");
+  const minute = String(minuteBucket).padStart(2, "0");
+  return `digest-dispatch:${slot.date}:${hour}:${minute}`;
 }
 
 export function isDigestDue(
@@ -111,27 +127,71 @@ export async function runScheduledDigestDispatch(
     (subscription) =>
       subscription.telegram && isDigestDue(subscription.frequency, slot),
   );
+  const issueKeyFor = (subscriptionId: string) =>
+    `digest:${subscriptionId}:${slot.date}`;
+  const existing = await deliveries.findByIssueKeys(
+    due.map((subscription) => issueKeyFor(subscription.id)),
+  );
+  const existingByIssueKey = new Map(
+    existing.map((delivery) => [delivery.issueKey, delivery]),
+  );
+  const nowMs = Date.parse(now);
+  const inProgressSubscriptions = new Set(
+    due.flatMap((subscription) => {
+      const delivery = existingByIssueKey.get(issueKeyFor(subscription.id));
+      return delivery?.status === "sending" &&
+        nowMs - Date.parse(delivery.updatedAt) < DELIVERY_LEASE_MS
+        ? [subscription.id]
+        : [];
+    }),
+  );
+  const alreadySentAtStart = due.filter(
+    (subscription) =>
+      existingByIssueKey.get(issueKeyFor(subscription.id))?.status === "sent",
+  ).length;
+  const batchSize = Math.max(1, Math.min(dependencies.batchSize ?? 6, 20));
+  const selected = due
+    .filter((subscription) => {
+      const delivery = existingByIssueKey.get(issueKeyFor(subscription.id));
+      return (
+        delivery?.status !== "sent" &&
+        !inProgressSubscriptions.has(subscription.id)
+      );
+    })
+    .sort((left, right) => {
+      const priority = (subscriptionId: string) => {
+        const delivery = existingByIssueKey.get(issueKeyFor(subscriptionId));
+
+        if (delivery?.issue.items.length) {
+          return 0;
+        }
+
+        return delivery ? 2 : 1;
+      };
+
+      return priority(left.id) - priority(right.id);
+    })
+    .slice(0, batchSize);
+  const approvedMaterials = (dependencies.materials ?? []).filter(
+    (material) => {
+      const approvedAt = Date.parse(material.approvedAt ?? "");
+      return Number.isFinite(approvedAt) && approvedAt <= Date.parse(cutoff);
+    },
+  );
   let sent = 0;
   let empty = 0;
-  let alreadySent = 0;
+  let alreadySent = alreadySentAtStart;
   const failed: Array<{ subscriptionId: string; error: string }> = [];
 
-  for (const subscription of due) {
+  for (const subscription of selected) {
     try {
       const delivery = await ensureDigestDelivery(
         subscription,
         {
           now,
           since: subscription.lastDigestAt ?? subscription.createdAt,
-          issueKey: `digest:${subscription.id}:${slot.date}`,
-          materials: (dependencies.materials ?? []).filter(
-            (material) => {
-              const approvedAt = Date.parse(material.approvedAt ?? "");
-              return (
-                Number.isFinite(approvedAt) && approvedAt <= Date.parse(cutoff)
-              );
-            },
-          ),
+          issueKey: issueKeyFor(subscription.id),
+          materials: approvedMaterials,
           events: dependencies.events ?? demoEvents,
         },
         deliveries,
@@ -140,6 +200,10 @@ export async function runScheduledDigestDispatch(
       if (!delivery.issue.items.length) {
         empty += 1;
         continue;
+      }
+
+      if (delivery.status === "waiting-telegram") {
+        await deliveries.markReadyBySubscriptionId(subscription.id, now);
       }
 
       const result = await dispatchDigestDelivery(delivery.id, {
@@ -167,6 +231,9 @@ export async function runScheduledDigestDispatch(
     slot: slot.date,
     cutoff,
     due: due.length,
+    selected: selected.length,
+    remaining: Math.max(0, due.length - alreadySent - sent),
+    inProgress: inProgressSubscriptions.size,
     sent,
     alreadySent,
     empty,

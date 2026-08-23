@@ -24,8 +24,11 @@ const envSchema = z.object({
   ADMIN_PASSWORD: z.string().trim().min(12).optional(),
   SESSION_SECRET: z.string().min(32).optional(),
   CRON_SECRET: z.string().min(24).optional(),
+  NEWS_AI_PROVIDER: z.enum(["openai", "perplexity"]).default("openai"),
   OPENAI_API_KEY: z.string().trim().min(20).optional(),
-  OPENAI_NEWS_MODEL: z.string().trim().min(1).default("gpt-5.6-sol"),
+  OPENAI_NEWS_MODEL: z.string().trim().min(1).default("gpt-5.6-luna"),
+  PERPLEXITY_API_KEY: z.string().trim().min(20).optional(),
+  PERPLEXITY_NEWS_MODEL: z.string().trim().min(1).default("sonar"),
   NEWS_INGESTION_MAX_AGE_MINUTES: z.coerce
     .number()
     .int()
@@ -44,6 +47,63 @@ const envSchema = z.object({
     .min(10_000)
     .max(300_000)
     .default(55_000),
+  NEWS_PROCESSING_BATCH_SIZE: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(50)
+    .default(8),
+  NEWS_PROCESSING_CONCURRENCY: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(10)
+    .default(3),
+  NEWS_PROCESSING_MAX_ATTEMPTS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(10)
+    .default(3),
+  NEWS_PROCESSING_RETRY_DELAY_MS: z.coerce
+    .number()
+    .int()
+    .min(10_000)
+    .max(86_400_000)
+    .default(300_000),
+  NEWS_PROCESSING_LEASE_MINUTES: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(120)
+    .default(15),
+  NEWS_DEAD_LETTER_RETRY_HOURS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(168)
+    .default(6),
+  NEWS_DEAD_LETTER_REQUEUE_BATCH_SIZE: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(100)
+    .default(24),
+  NEWS_AUTO_APPROVE: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((value) => value === "true"),
+  NEWS_AUTO_APPROVE_MIN_CONFIDENCE: z.coerce
+    .number()
+    .min(0.5)
+    .max(1)
+    .default(0.8),
+  DIGEST_DISPATCH_BATCH_SIZE: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(20)
+    .default(6),
 });
 
 function optionalTrimmed(value: string | undefined): string | undefined {
@@ -67,8 +127,11 @@ export function parseEnvironment(
     ADMIN_PASSWORD: optionalTrimmed(source.ADMIN_PASSWORD),
     SESSION_SECRET: optionalTrimmed(source.SESSION_SECRET),
     CRON_SECRET: optionalTrimmed(source.CRON_SECRET),
+    NEWS_AI_PROVIDER: optionalTrimmed(source.NEWS_AI_PROVIDER),
     OPENAI_API_KEY: optionalTrimmed(source.OPENAI_API_KEY),
     OPENAI_NEWS_MODEL: optionalTrimmed(source.OPENAI_NEWS_MODEL),
+    PERPLEXITY_API_KEY: optionalTrimmed(source.PERPLEXITY_API_KEY),
+    PERPLEXITY_NEWS_MODEL: optionalTrimmed(source.PERPLEXITY_NEWS_MODEL),
     NEWS_INGESTION_MAX_AGE_MINUTES: optionalTrimmed(
       source.NEWS_INGESTION_MAX_AGE_MINUTES,
     ),
@@ -76,6 +139,34 @@ export function parseEnvironment(
       source.NEWS_APPROVED_SOURCE_MAX_AGE_HOURS,
     ),
     NEWS_AGENT_TIMEOUT_MS: optionalTrimmed(source.NEWS_AGENT_TIMEOUT_MS),
+    NEWS_PROCESSING_BATCH_SIZE: optionalTrimmed(
+      source.NEWS_PROCESSING_BATCH_SIZE,
+    ),
+    NEWS_PROCESSING_CONCURRENCY: optionalTrimmed(
+      source.NEWS_PROCESSING_CONCURRENCY,
+    ),
+    NEWS_PROCESSING_MAX_ATTEMPTS: optionalTrimmed(
+      source.NEWS_PROCESSING_MAX_ATTEMPTS,
+    ),
+    NEWS_PROCESSING_RETRY_DELAY_MS: optionalTrimmed(
+      source.NEWS_PROCESSING_RETRY_DELAY_MS,
+    ),
+    NEWS_PROCESSING_LEASE_MINUTES: optionalTrimmed(
+      source.NEWS_PROCESSING_LEASE_MINUTES,
+    ),
+    NEWS_DEAD_LETTER_RETRY_HOURS: optionalTrimmed(
+      source.NEWS_DEAD_LETTER_RETRY_HOURS,
+    ),
+    NEWS_DEAD_LETTER_REQUEUE_BATCH_SIZE: optionalTrimmed(
+      source.NEWS_DEAD_LETTER_REQUEUE_BATCH_SIZE,
+    ),
+    NEWS_AUTO_APPROVE: optionalTrimmed(source.NEWS_AUTO_APPROVE),
+    NEWS_AUTO_APPROVE_MIN_CONFIDENCE: optionalTrimmed(
+      source.NEWS_AUTO_APPROVE_MIN_CONFIDENCE,
+    ),
+    DIGEST_DISPATCH_BATCH_SIZE: optionalTrimmed(
+      source.DIGEST_DISPATCH_BATCH_SIZE,
+    ),
   });
 }
 

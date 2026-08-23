@@ -11,6 +11,11 @@ import type {
   NewsIngestionRun,
 } from "@/features/news-ingestion/news-candidate.types";
 import {
+  getNewsAiProviderConfiguration,
+  recordNewsAiUsage,
+} from "@/features/news-ingestion/news-ai-provider";
+import { NewsAgentError } from "@/features/news-ingestion/news-agent.error";
+import {
   getAgentSources,
   newsSourceRegistry,
 } from "@/features/news-sources/news-source.registry";
@@ -55,21 +60,7 @@ const agentEnvelopeSchema = z.object({
   candidates: z.array(z.unknown()).max(12),
 });
 
-export class NewsAgentError extends Error {
-  constructor(
-    public readonly code:
-      | "OPENAI_NOT_CONFIGURED"
-      | "OPENAI_UPSTREAM_ERROR"
-      | "OPENAI_TIMEOUT"
-      | "INVALID_AGENT_RESPONSE"
-      | "NO_ALLOWED_SOURCES",
-    message: string,
-    public readonly status: number,
-  ) {
-    super(message);
-    this.name = "NewsAgentError";
-  }
-}
+export { NewsAgentError };
 
 export interface RunNewsAgentInput {
   days: number;
@@ -84,6 +75,9 @@ export interface RunNewsAgentInput {
 }
 
 interface RawResponse {
+  id?: string;
+  model?: string;
+  usage?: unknown;
   output?: Array<{
     type?: string;
     action?: {
@@ -365,6 +359,8 @@ export function buildNewsAgentRequest(
     dateFrom: dateFrom.toISOString(),
     body: {
       model: env.OPENAI_NEWS_MODEL,
+      store: false,
+      service_tier: "default",
       reasoning: { effort: "low" },
       tools: [
         {
@@ -480,6 +476,12 @@ async function collectCandidatesOnce(
       502,
     );
   }
+
+  await recordNewsAiUsage(
+    responseBody,
+    { provider: "openai", model: env.OPENAI_NEWS_MODEL },
+    { operation: "web-search" },
+  );
 
   const outputText = extractOutputText(responseBody);
   const consultedUrls = extractWebSearchSourceUrls(responseBody);
@@ -717,10 +719,10 @@ export async function runNewsAgent(input: RunNewsAgentInput): Promise<{
 
 export function getNewsAgentConfiguration() {
   const enabledSourceCount = getAgentSources().length;
+  const provider = getNewsAiProviderConfiguration();
 
   return {
-    configured: Boolean(env.OPENAI_API_KEY),
-    model: env.OPENAI_NEWS_MODEL,
+    ...provider,
     enabledSourceCount,
     totalSourceCount: newsSourceRegistry.length,
     // Полный обход реестра складывается из такого числа последовательных

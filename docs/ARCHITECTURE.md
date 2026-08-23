@@ -27,6 +27,13 @@ complete product path without requiring production secrets:
 - **Jobs:** digest generation and delivery are designed as idempotent jobs.
 - **Integrations:** Telegram, AI and storage are adapters configured only
   through environment variables.
+- **AI provider:** RSS classification uses one provider-neutral structured
+  output boundary. `NEWS_AI_PROVIDER` selects OpenAI Responses or Perplexity
+  Sonar; queue, validation and editorial code do not depend on either API.
+- **AI metering:** every successful provider response creates an immutable
+  `news_ai_usage_events` row. Token categories, retries, model-filtered rows,
+  provider-reported Perplexity cost and calculated OpenAI token/tool cost stay
+  auditable independently from accepted candidates.
 
 ## Telegram flow
 
@@ -76,16 +83,33 @@ No secret is committed to the repository. Before production launch:
 The production scheduler calls two protected endpoints with
 `Authorization: Bearer <CRON_SECRET>`:
 
-- `POST /api/jobs/news-ingestion` — hourly source discovery with mandatory live
-  web search, a domain allowlist and a bounded publication window. The hour is
-  an idempotency slot, so repeated calls do not duplicate a run.
-- `POST /api/jobs/digest-dispatch` — every ten minutes between 12:00 and 14:59
-  Europe/Moscow. The wider retry window protects against scheduler delay; the
-  idempotency key still creates at most one delivery per subscriber/date.
+- `POST /api/jobs/news-ingestion` — hourly RSS discovery followed by a bounded
+  drain of the durable `news_articles` queue. Canonical URL and content hashes
+  deduplicate work. Articles are claimed with row locks and leases, enriched
+  independently with bounded concurrency, and retried independently. The hour
+  remains an idempotency slot while unfinished rows stay available to later
+  slots.
+- `POST /api/jobs/digest-dispatch` — every five minutes between 12:00 and 14:59
+  Europe/Moscow. Each invocation processes a bounded batch; per-slot job keys
+  allow later ticks to continue while per-subscriber/date issue keys still
+  prevent duplicate deliveries.
 
 Job and delivery state is persistent. A failed job may retry three times and
 then moves to `dead-letter`; stale `running` jobs can be reclaimed after a
 15-minute lease.
+
+News articles use the same reliability pattern at finer granularity. One bad
+page or provider timeout moves only that article to `retry`; three failed
+attempts move it to `dead-letter`. Provider and legacy OpenAI failures are
+requeued after a cooldown with a fresh attempt budget; permanent content
+errors, accepted items and rejected items remain terminal. If every claimed
+article fails, the HTTP job itself returns an error and no successful ingestion
+run is recorded, so monitoring cannot confuse a provider outage with an empty
+news day.
+
+In autonomous mode, candidates are approved only after the registry,
+freshness, tag, numeric-metric and confidence gates pass. The same pipeline can
+be switched back to mandatory editorial approval with `NEWS_AUTO_APPROVE=false`.
 
 Telegram delivery also uses a 15-minute lease and persistent per-message
 checkpoints. If a multipart digest fails midway, the retry resumes from the

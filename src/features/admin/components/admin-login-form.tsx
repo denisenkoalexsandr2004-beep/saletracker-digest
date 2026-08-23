@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { FormEvent, useState } from "react";
 
@@ -37,6 +38,14 @@ export function AdminLoginForm({ configured }: { configured: boolean }) {
 
   return (
     <form className="admin-login-card" onSubmit={submit}>
+      <Image
+        alt="Сейл Трекер"
+        className="admin-login-logo"
+        height={40}
+        priority
+        src="/brand/saletracker-logo.svg"
+        width={194}
+      />
       <p className="mono-label">SaleTracker / защищённый контур</p>
       <h1>Вход в редакцию</h1>
       <p>
@@ -46,16 +55,24 @@ export function AdminLoginForm({ configured }: { configured: boolean }) {
       <label>
         Пароль администратора
         <input
+          aria-describedby={error ? "admin-login-error" : undefined}
+          aria-invalid={Boolean(error)}
           autoComplete="current-password"
           disabled={!configured || pending}
           minLength={12}
+          name="password"
           onChange={(event) => setPassword(event.target.value)}
           required
+          spellCheck={false}
           type="password"
           value={password}
         />
       </label>
-      {error ? <p className="admin-login-error">{error}</p> : null}
+      {error ? (
+        <p className="admin-login-error" id="admin-login-error" role="alert">
+          {error}
+        </p>
+      ) : null}
       {!configured ? (
         <p className="admin-login-error">
           На сервере не заданы ADMIN_PASSWORD и SESSION_SECRET.

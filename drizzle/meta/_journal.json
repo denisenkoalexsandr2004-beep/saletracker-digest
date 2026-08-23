@@ -15,6 +15,20 @@
       "when": 1786608311795,
       "tag": "0001_nifty_northstar",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1787298938053,
+      "tag": "0002_public_randall",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1787302349621,
+      "tag": "0003_fixed_pretty_boy",
+      "breakpoints": true
     }
   ]
 }

@@ -10,13 +10,14 @@ import { runFeedIngestion } from "@/features/news-ingestion/rss-ingestion";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
+export const maxDuration = 300;
 
 const inputSchema = z.object({
   days: z.number().int().min(1).max(31).default(7),
   maxCandidates: z.number().int().min(1).max(12).default(8),
   sourceIds: z.array(z.string().trim().min(1)).max(100).optional(),
   groupOffset: z.number().int().min(0).max(20).optional(),
-  entryOffset: z.number().int().min(0).max(500).optional(),
+  discover: z.boolean().optional(),
   // Ленты отдают все публикации за период, поиск — выборку. Основным режимом
   // работают ленты, поиск остаётся для источников без них.
   mode: z.enum(["feeds", "search"]).default("feeds"),
@@ -61,10 +62,10 @@ export async function POST(request: Request) {
       return NextResponse.json({
         data: result,
         message: diagnostics.accepted
-          ? `Разобрано публикаций: ${diagnostics.entriesReviewed} из ${diagnostics.entriesFound}. Собрано кандидатов: ${diagnostics.accepted}.`
+          ? `Новых в очереди: ${diagnostics.entriesQueued}. Обработано: ${diagnostics.entriesReviewed}. Собрано кандидатов: ${diagnostics.accepted}. Осталось: ${diagnostics.queue.pending}.`
           : diagnostics.entriesReviewed
-            ? `Разобрано публикаций: ${diagnostics.entriesReviewed}, ни одна не прошла проверку.${rejectionSummary ? ` Причины: ${rejectionSummary}.` : ""}`
-            : "Свежих публикаций в лентах не осталось.",
+            ? `Обработано публикаций: ${diagnostics.entriesReviewed}, кандидатов нет.${rejectionSummary ? ` Причины: ${rejectionSummary}.` : ""}${diagnostics.failed ? ` В повторную очередь: ${diagnostics.retried}.` : ""}`
+            : `Новых публикаций: ${diagnostics.entriesQueued}. Готовых к обработке задач сейчас нет.`,
       });
     }
 

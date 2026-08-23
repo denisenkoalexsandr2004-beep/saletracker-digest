@@ -158,6 +158,16 @@ await check("admin sees the created subscriber and exact digest", async () => {
   );
 });
 
+await check("admin sees AI usage totals", async () => {
+  const result = await request("/api/admin/ai-usage", {
+    headers: { cookie: adminCookie },
+  });
+  expectStatus(result, 200, "authenticated AI usage");
+  assert.equal(result.body.data.currency, "USD");
+  assert.equal(result.body.data.allTime.requestCount, 0);
+  assert.equal(result.body.data.last24Hours.totalTokens, 0);
+});
+
 await check("AI endpoint explains missing credentials", async () => {
   const result = await request("/api/admin/ingestion-runs", {
     method: "POST",
@@ -168,7 +178,7 @@ await check("AI endpoint explains missing credentials", async () => {
     body: JSON.stringify({ days: 7, maxCandidates: 5 }),
   });
   expectStatus(result, 503, "AI ingestion without key");
-  assert.equal(result.body.title, "OPENAI_NOT_CONFIGURED");
+  assert.equal(result.body.title, "NEWS_PROVIDER_NOT_CONFIGURED");
 });
 
 await check("cron endpoint is closed without its server secret", async () => {

@@ -3,12 +3,26 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 
 import { checkCandidateQuality } from "@/features/news-ingestion/candidate-quality";
+import {
+  getNewsArticleQueueRepository,
+  type NewsArticleQueueStats,
+  type QueuedNewsArticle,
+} from "@/features/news-ingestion/news-article-queue.repository";
+import {
+  autoApproveNewsCandidates,
+  type NewsAutoApprovalResult,
+} from "@/features/news-ingestion/news-auto-approval.service";
 import { getNewsCandidateRepository } from "@/features/news-ingestion/news-candidate.repository";
 import type {
   NewsCandidate,
   NewsIngestionRun,
 } from "@/features/news-ingestion/news-candidate.types";
-import { NewsAgentError } from "@/features/news-ingestion/openai-news-agent";
+import {
+  getNewsAiProviderConfiguration,
+  requestStructuredNewsAnalysis,
+  type StructuredNewsAnalysisRequest,
+} from "@/features/news-ingestion/news-ai-provider";
+import { NewsAgentError } from "@/features/news-ingestion/news-agent.error";
 import {
   fetchFeed,
   getFeedSources,
@@ -20,9 +34,6 @@ import type { NewsSource } from "@/features/news-sources/news-source.types";
 import { digestTags } from "@/features/subscriptions/subscription.categories";
 import { env } from "@/shared/config/env";
 
-// Порция публикаций на один вызов. Полный обход собирается из нескольких
-// вызовов подряд, чтобы каждый уложился в лимит времени serverless-функции.
-const ENTRIES_PER_BATCH = 25;
 const ARTICLE_TEXT_LIMIT = 6_000;
 
 const cardSchema = z.object({
@@ -45,24 +56,59 @@ const cardSchema = z.object({
   confidence: z.number().min(0).max(1),
 });
 
-const cardsEnvelopeSchema = z.object({ cards: z.array(z.unknown()).max(20) });
+const cardsEnvelopeSchema = z.object({ cards: z.array(z.unknown()).max(1) });
 
 export interface FeedIngestionInput {
   days: number;
   maxCandidates: number;
   sourceIds?: string[];
-  /** Сколько свежих публикаций пропустить — номер порции разбора. */
-  entryOffset?: number;
+  /** Skip network discovery and only drain articles already in the queue. */
+  discover?: boolean;
 }
 
 export interface FeedIngestionDiagnostics {
   feedCount: number;
   entriesFound: number;
+  entriesQueued: number;
+  entriesAlreadyKnown: number;
   entriesReviewed: number;
   articlesRead: number;
   accepted: number;
+  failed: number;
+  retried: number;
+  deadLettered: number;
+  deadLettersRequeued: number;
+  autoApproval: NewsAutoApprovalResult & { enabled: boolean };
   rejected: Array<{ sourceUrl: string; reasons: string[] }>;
+  queue: NewsArticleQueueStats;
 }
+
+interface AcceptedArticleResult {
+  kind: "accepted";
+  article: QueuedNewsArticle;
+  candidate: NewsCandidate;
+  articleRead: boolean;
+}
+
+interface RejectedArticleResult {
+  kind: "rejected";
+  article: QueuedNewsArticle;
+  reasons: string[];
+  articleRead: boolean;
+}
+
+interface FailedArticleResult {
+  kind: "failed";
+  article: QueuedNewsArticle;
+  queueStatus: "retry" | "dead-letter";
+  articleRead: boolean;
+  error: string;
+}
+
+type ArticleProcessingResult =
+  | AcceptedArticleResult
+  | RejectedArticleResult
+  | FailedArticleResult;
 
 function selectFeedSources(sourceIds?: string[]): NewsSource[] {
   const allowed = sourceIds?.length ? new Set(sourceIds) : null;
@@ -71,10 +117,7 @@ function selectFeedSources(sourceIds?: string[]): NewsSource[] {
   );
 }
 
-/**
- * Достаёт читаемый текст публикации. Разметка выбрасывается целиком: модели
- * нужен фактический материал, а не навигация и скрипты.
- */
+/** Fetches readable article text without scripts, styles or page markup. */
 export async function fetchArticleText(
   url: string,
   timeoutMs = 12_000,
@@ -96,8 +139,9 @@ export async function fetchArticleText(
 
     const buffer = await response.arrayBuffer();
     const charset =
-      /charset=["']?([\w-]+)/i.exec(response.headers.get("content-type") ?? "")?.[1] ??
-      "utf-8";
+      /charset=["']?([\w-]+)/i.exec(
+        response.headers.get("content-type") ?? "",
+      )?.[1] ?? "utf-8";
     let html: string;
 
     try {
@@ -124,77 +168,13 @@ export async function fetchArticleText(
   }
 }
 
-async function askModel(
-  body: Record<string, unknown>,
-  timeoutMs: number,
-): Promise<string> {
-  let response: Response;
-
-  try {
-    response = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-  } catch (error) {
-    const timedOut =
-      error instanceof Error &&
-      (error.name === "TimeoutError" || error.name === "AbortError");
-    throw new NewsAgentError(
-      timedOut ? "OPENAI_TIMEOUT" : "OPENAI_UPSTREAM_ERROR",
-      timedOut
-        ? `Разбор публикаций не уложился в ${Math.round(timeoutMs / 1_000)} с.`
-        : `Не удалось связаться с OpenAI: ${error instanceof Error ? error.message : "сетевая ошибка"}.`,
-      timedOut ? 504 : 502,
-    );
-  }
-
-  const payload = (await response.json()) as {
-    output?: Array<{
-      type?: string;
-      content?: Array<{ type?: string; text?: string }>;
-    }>;
-    error?: { message?: string };
-  };
-
-  if (!response.ok) {
-    throw new NewsAgentError(
-      "OPENAI_UPSTREAM_ERROR",
-      payload.error?.message ?? "OpenAI не смог обработать публикации.",
-      502,
-    );
-  }
-
-  for (const output of payload.output ?? []) {
-    if (output.type !== "message") {
-      continue;
-    }
-
-    for (const content of output.content ?? []) {
-      if (content.type === "output_text" && content.text) {
-        return content.text;
-      }
-    }
-  }
-
-  throw new NewsAgentError(
-    "INVALID_AGENT_RESPONSE",
-    "Модель не вернула структурированный результат.",
-    502,
-  );
-}
-
 const cardsOutputSchema = {
   type: "object",
   additionalProperties: false,
   properties: {
     cards: {
       type: "array",
-      maxItems: 20,
+      maxItems: 1,
       items: {
         type: "object",
         additionalProperties: false,
@@ -219,7 +199,12 @@ const cardsOutputSchema = {
               required: ["value", "label", "context"],
             },
           },
-          tags: { type: "array", minItems: 1, maxItems: 8, items: { type: "string" } },
+          tags: {
+            type: "array",
+            minItems: 1,
+            maxItems: 8,
+            items: { type: "string" },
+          },
           confidence: { type: "number", minimum: 0, maximum: 1 },
         },
         required: [
@@ -238,114 +223,103 @@ const cardsOutputSchema = {
   required: ["cards"],
 } as const;
 
-export function buildCardsRequest(
+export function buildCardsAnalysisRequest(
   articles: Array<FeedEntry & { text: string }>,
   maxCards: number,
-) {
+): StructuredNewsAnalysisRequest {
   return {
-    model: env.OPENAI_NEWS_MODEL,
-    reasoning: { effort: "low" },
-    input: [
-      {
-        role: "system",
-        content:
-          "Вы — редактор отраслевой аналитики SaleTracker. Вам передают тексты публикаций, уже собранные из проверенных изданий. Ваша задача — отобрать те, что важны поставщикам и закупщикам розничных сетей, и оформить по ним карточки. Пишите по-русски, профессионально и без штампов. Используйте только факты из переданного текста: не додумывайте цифры, даты и названия. Каждая карточка обязана содержать минимум один числовой показатель, взятый из текста. Если в публикации нет ни одной проверяемой цифры или она не относится к рынку, просто не включайте её в ответ.",
-      },
-      {
-        role: "user",
-        content: [
-          `Отберите до ${maxCards} самых значимых публикаций и оформите карточки.`,
-          `Поле sourceUrl копируйте буквально из блока публикации, не изменяя.`,
-          `Используйте только теги из каталога SaleTracker: ${digestTags.join(", ")}.`,
-          "",
-          ...articles.map(
-            (article, index) =>
-              `### Публикация ${index + 1}\nsourceUrl: ${article.url}\nИздание: ${article.sourceName}\nДата: ${article.publishedAt}\nЗаголовок: ${article.title}\nТекст: ${article.text || article.summary}`,
-          ),
-        ].join("\n"),
-      },
-    ],
-    text: {
-      format: {
-        type: "json_schema",
-        name: "saletracker_feed_cards",
-        strict: true,
-        schema: cardsOutputSchema,
-      },
-    },
+    schemaName: "saletracker_feed_card",
+    schema: cardsOutputSchema,
+    systemPrompt:
+      "Вы — редактор отраслевой аналитики SaleTracker. Вам передают текст одной публикации из проверенного издания. Определите, важна ли она поставщикам и закупщикам розничных сетей. Если важна — оформите одну карточку, если нет — верните пустой массив cards. Пишите по-русски, профессионально и без штампов. Используйте только факты из переданного текста: не додумывайте цифры, даты и названия. Карточка обязана содержать минимум один числовой показатель из текста. Верните данные как JSON-объект по переданной схеме.",
+    userPrompt: [
+      `Оформите не более ${Math.min(1, maxCards)} карточки.`,
+      "Поле sourceUrl скопируйте буквально, не изменяя.",
+      `Используйте только теги из каталога SaleTracker: ${digestTags.join(", ")}.`,
+      "",
+      ...articles.map(
+        (article) =>
+          `sourceUrl: ${article.url}\nИздание: ${article.sourceName}\nДата: ${article.publishedAt}\nЗаголовок: ${article.title}\nТекст: ${article.text || article.summary}`,
+      ),
+    ].join("\n"),
   };
 }
 
-export async function runFeedIngestion(input: FeedIngestionInput): Promise<{
-  run: NewsIngestionRun;
-  candidates: NewsCandidate[];
-  diagnostics: FeedIngestionDiagnostics;
-}> {
-  if (!env.OPENAI_API_KEY) {
-    throw new NewsAgentError(
-      "OPENAI_NOT_CONFIGURED",
-      "Добавьте OPENAI_API_KEY, чтобы разбирать публикации из лент.",
-      503,
-    );
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index]);
+    }
   }
 
-  const sources = selectFeedSources(input.sourceIds);
-
-  if (!sources.length) {
-    throw new NewsAgentError(
-      "NO_ALLOWED_SOURCES",
-      "Ни у одного выбранного источника нет ленты.",
-      422,
-    );
-  }
-
-  const startedAt = new Date().toISOString();
-  const earliest = new Date(startedAt);
-  earliest.setUTCDate(earliest.getUTCDate() - input.days);
-  const earliestIso = earliest.toISOString();
-
-  // Ленты читаются параллельно: недоступная не должна задерживать остальные.
-  const feeds = await Promise.all(sources.map((source) => fetchFeed(source)));
-  const entries = selectFreshEntries(feeds.flat(), earliestIso, startedAt);
-  const offset = Math.max(0, input.entryOffset ?? 0);
-  const reviewed = entries.slice(offset, offset + ENTRIES_PER_BATCH);
-
-  if (!reviewed.length) {
-    const emptyRun: NewsIngestionRun = {
-      id: `ingestion_${randomUUID()}`,
-      startedAt,
-      completedAt: new Date().toISOString(),
-      model: env.OPENAI_NEWS_MODEL,
-      sourceCount: sources.length,
-      candidateCount: 0,
-    };
-    await getNewsCandidateRepository().saveRun(emptyRun, []);
-    return {
-      run: emptyRun,
-      candidates: [],
-      diagnostics: {
-        feedCount: sources.length,
-        entriesFound: entries.length,
-        entriesReviewed: 0,
-        articlesRead: 0,
-        accepted: 0,
-        rejected: [],
-      },
-    };
-  }
-
-  const texts = await Promise.all(
-    reviewed.map(async (entry) => ({
-      ...entry,
-      text: await fetchArticleText(entry.url),
-    })),
+  await Promise.all(
+    Array.from(
+      { length: Math.min(Math.max(1, concurrency), items.length) },
+      () => worker(),
+    ),
   );
-  const articlesRead = texts.filter((article) => article.text.length > 0).length;
-  const outputText = await askModel(
-    buildCardsRequest(texts, input.maxCandidates),
+  return results;
+}
+
+async function analyzeArticle(
+  article: QueuedNewsArticle,
+  sources: NewsSource[],
+  earliestIso: string,
+): Promise<
+  | Omit<AcceptedArticleResult, "article">
+  | (Omit<RejectedArticleResult, "article"> & { alreadyMarked?: boolean })
+> {
+  let text = article.articleText ?? "";
+  let articleRead = false;
+
+  if (!text) {
+    const fetched = await fetchArticleText(article.sourceUrl);
+    articleRead = Boolean(fetched);
+    text = fetched || article.summary;
+
+    if (text.trim().length < 30) {
+      throw new Error("ARTICLE_TEXT_UNAVAILABLE");
+    }
+
+    const stored = await getNewsArticleQueueRepository().storeArticleText(
+      article.id,
+      text,
+      new Date().toISOString(),
+    );
+
+    if (stored.duplicateOf) {
+      return {
+        kind: "rejected",
+        reasons: [`duplicate-content:${stored.duplicateOf}`],
+        articleRead,
+        alreadyMarked: true,
+      };
+    }
+  }
+
+  const feedEntry: FeedEntry & { text: string } = {
+    sourceId: article.sourceId,
+    sourceName: article.sourceName,
+    title: article.title,
+    url: article.sourceUrl,
+    publishedAt: article.publishedAt,
+    summary: article.summary,
+    text,
+  };
+  const outputText = await requestStructuredNewsAnalysis(
+    buildCardsAnalysisRequest([feedEntry], 1),
     env.NEWS_AGENT_TIMEOUT_MS,
+    { operation: "feed-analysis", newsArticleId: article.id },
   );
-
   let parsedJson: unknown;
 
   try {
@@ -363,68 +337,67 @@ export async function runFeedIngestion(input: FeedIngestionInput): Promise<{
   if (!envelope.success) {
     throw new NewsAgentError(
       "INVALID_AGENT_RESPONSE",
-      "Ответ модели не содержит списка карточек.",
+      "Ответ модели не содержит корректного списка карточек.",
       502,
     );
   }
 
-  const knownEntries = new Map(texts.map((entry) => [entry.url, entry]));
+  if (!envelope.data.cards.length) {
+    return { kind: "rejected", reasons: ["model-filtered"], articleRead };
+  }
+
+  const parsed = cardSchema.safeParse(envelope.data.cards[0]);
+
+  if (!parsed.success) {
+    return {
+      kind: "rejected",
+      reasons: parsed.error.issues
+        .slice(0, 5)
+        .map((issue) => `schema:${issue.path.join(".") || "?"}`),
+      articleRead,
+    };
+  }
+
+  const card = parsed.data;
+
+  if (card.sourceUrl !== article.sourceUrl) {
+    return {
+      kind: "rejected",
+      reasons: ["url-not-from-feed"],
+      articleRead,
+    };
+  }
+
   const collectedAt = new Date().toISOString();
-  const rejected: Array<{ sourceUrl: string; reasons: string[] }> = [];
-  const candidates: NewsCandidate[] = [];
+  const quality = checkCandidateQuality(
+    {
+      sourceUrl: card.sourceUrl,
+      publishedAt: article.publishedAt,
+      tags: card.tags,
+      keyMetrics: card.keyMetrics,
+    },
+    sources,
+    earliestIso,
+    collectedAt,
+  );
 
-  for (const raw of envelope.data.cards) {
-    const parsed = cardSchema.safeParse(raw);
+  if (!quality.accepted) {
+    return {
+      kind: "rejected",
+      reasons: quality.reasons,
+      articleRead,
+    };
+  }
 
-    if (!parsed.success) {
-      rejected.push({
-        sourceUrl:
-          typeof (raw as { sourceUrl?: unknown })?.sourceUrl === "string"
-            ? (raw as { sourceUrl: string }).sourceUrl
-            : "—",
-        reasons: parsed.error.issues
-          .slice(0, 5)
-          .map((issue) => `schema:${issue.path.join(".") || "?"}`),
-      });
-      continue;
-    }
-
-    const card = parsed.data;
-    // Ссылка обязана совпадать с публикацией из ленты — так карточка не может
-    // сослаться на выдуманный адрес.
-    const entry = knownEntries.get(card.sourceUrl);
-
-    if (!entry) {
-      rejected.push({
-        sourceUrl: card.sourceUrl,
-        reasons: ["url-not-from-feed"],
-      });
-      continue;
-    }
-
-    const quality = checkCandidateQuality(
-      {
-        sourceUrl: card.sourceUrl,
-        publishedAt: entry.publishedAt,
-        tags: card.tags,
-        keyMetrics: card.keyMetrics,
-      },
-      sources,
-      earliestIso,
-      collectedAt,
-    );
-
-    if (!quality.accepted) {
-      rejected.push({ sourceUrl: card.sourceUrl, reasons: quality.reasons });
-      continue;
-    }
-
-    candidates.push({
+  return {
+    kind: "accepted",
+    articleRead,
+    candidate: {
       id: `candidate_${randomUUID()}`,
       title: card.title,
-      sourceName: quality.source?.name ?? entry.sourceName,
+      sourceName: quality.source?.name ?? article.sourceName,
       sourceUrl: card.sourceUrl,
-      publishedAt: entry.publishedAt,
+      publishedAt: article.publishedAt,
       collectedAt,
       summary: card.summary,
       marketImpact: card.marketImpact,
@@ -435,31 +408,208 @@ export async function runFeedIngestion(input: FeedIngestionInput): Promise<{
       status: "collected",
       verificationStatus: "structural-pass",
       verificationReasons: quality.reasons,
+    },
+  };
+}
+
+async function processClaimedArticle(
+  article: QueuedNewsArticle,
+  sources: NewsSource[],
+  earliestIso: string,
+): Promise<ArticleProcessingResult> {
+  const queue = getNewsArticleQueueRepository();
+
+  try {
+    const result = await analyzeArticle(article, sources, earliestIso);
+
+    if (result.kind === "rejected") {
+      if (!result.alreadyMarked) {
+        await queue.markRejected(
+          article.id,
+          result.reasons,
+          new Date().toISOString(),
+        );
+      }
+
+      return { ...result, article };
+    }
+
+    return { ...result, article };
+  } catch (error) {
+    const message =
+      error instanceof NewsAgentError
+        ? `${error.code}: ${error.message}`
+        : error instanceof Error
+          ? error.message
+          : "UNKNOWN_ARTICLE_PROCESSING_ERROR";
+    const queueStatus = await queue.markFailed(article.id, {
+      error: message,
+      maxAttempts: env.NEWS_PROCESSING_MAX_ATTEMPTS,
+      retryDelayMs: env.NEWS_PROCESSING_RETRY_DELAY_MS,
+      now: new Date().toISOString(),
     });
+
+    return {
+      kind: "failed",
+      article,
+      articleRead: false,
+      queueStatus: queueStatus === "dead-letter" ? "dead-letter" : "retry",
+      error: message,
+    };
+  }
+}
+
+export function assertFeedBatchSucceeded(
+  reviewedCount: number,
+  failures: string[],
+  providerLabel: string,
+): void {
+  if (reviewedCount === 0 || failures.length !== reviewedCount) {
+    return;
   }
 
-  const accepted = candidates.slice(0, input.maxCandidates);
+  throw new NewsAgentError(
+    "NEWS_INGESTION_BATCH_FAILED",
+    `Не обработана ни одна публикация из ${reviewedCount}. Выбранный AI-провайдер: ${providerLabel}. Первая ошибка: ${failures[0] ?? "неизвестная ошибка"}`,
+    502,
+  );
+}
+
+export async function runFeedIngestion(input: FeedIngestionInput): Promise<{
+  run: NewsIngestionRun;
+  candidates: NewsCandidate[];
+  diagnostics: FeedIngestionDiagnostics;
+}> {
+  const sources = selectFeedSources(input.sourceIds);
+
+  if (!sources.length) {
+    throw new NewsAgentError(
+      "NO_ALLOWED_SOURCES",
+      "Ни у одного выбранного источника нет ленты.",
+      422,
+    );
+  }
+
+  const queue = getNewsArticleQueueRepository();
+  const startedAt = new Date().toISOString();
+  const earliest = new Date(startedAt);
+  earliest.setUTCDate(earliest.getUTCDate() - input.days);
+  const earliestIso = earliest.toISOString();
+  let entries: FeedEntry[] = [];
+
+  if (input.discover !== false) {
+    const feeds = await Promise.all(sources.map((source) => fetchFeed(source)));
+    entries = selectFreshEntries(feeds.flat(), earliestIso, startedAt);
+  }
+
+  const enqueued = await queue.enqueue(entries, startedAt);
+  const provider = getNewsAiProviderConfiguration();
+
+  if (!provider.configured) {
+    throw new NewsAgentError(
+      "NEWS_PROVIDER_NOT_CONFIGURED",
+      `Публикации сохранены в очередь (${enqueued.created}), но для ${provider.providerLabel} нужен ${provider.credentialName}.`,
+      503,
+    );
+  }
+
+  const retryBefore = new Date(
+    Date.parse(startedAt) - env.NEWS_DEAD_LETTER_RETRY_HOURS * 60 * 60_000,
+  ).toISOString();
+  const deadLettersRequeued = await queue.requeueRecoverableDeadLetters({
+    limit: env.NEWS_DEAD_LETTER_REQUEUE_BATCH_SIZE,
+    retryBefore,
+    now: new Date().toISOString(),
+  });
+
+  const claimed = await queue.claim({
+    limit: env.NEWS_PROCESSING_BATCH_SIZE,
+    maxAttempts: env.NEWS_PROCESSING_MAX_ATTEMPTS,
+    leaseMs: env.NEWS_PROCESSING_LEASE_MINUTES * 60_000,
+    now: new Date().toISOString(),
+  });
+  const processingResults = await mapWithConcurrency(
+    claimed,
+    env.NEWS_PROCESSING_CONCURRENCY,
+    (article) => processClaimedArticle(article, sources, earliestIso),
+  );
+  const acceptedResults = processingResults.filter(
+    (result): result is AcceptedArticleResult => result.kind === "accepted",
+  );
+  const failedResults = processingResults.filter(
+    (result): result is FailedArticleResult => result.kind === "failed",
+  );
+
+  assertFeedBatchSucceeded(
+    processingResults.length,
+    failedResults.map((result) => result.error),
+    provider.providerLabel,
+  );
+
+  const candidates = acceptedResults.map((result) => result.candidate);
   const run: NewsIngestionRun = {
     id: `ingestion_${randomUUID()}`,
     startedAt,
     completedAt: new Date().toISOString(),
-    model: env.OPENAI_NEWS_MODEL,
+    model: `${provider.provider}/${provider.model}`,
     sourceCount: sources.length,
-    candidateCount: accepted.length,
+    candidateCount: candidates.length,
   };
 
-  await getNewsCandidateRepository().saveRun(run, accepted);
+  // Persist candidates before acknowledging queue rows. A failed transaction
+  // leaves leases to expire, making the same work safely retryable.
+  const candidateRepository = getNewsCandidateRepository();
+  await candidateRepository.saveRun(run, candidates);
+  const autoApproval = env.NEWS_AUTO_APPROVE
+    ? await autoApproveNewsCandidates(
+        await candidateRepository.listCandidates(100),
+        env.NEWS_AUTO_APPROVE_MIN_CONFIDENCE,
+        { candidates: candidateRepository },
+      )
+    : {
+        eligible: 0,
+        approved: 0,
+        skipped: candidates.length,
+        failed: [],
+      };
+  await Promise.all(
+    acceptedResults.map((result) =>
+      queue.markProcessed(result.article.id, new Date().toISOString()),
+    ),
+  );
+
+  const rejected = processingResults
+    .filter(
+      (result): result is RejectedArticleResult => result.kind === "rejected",
+    )
+    .map((result) => ({
+      sourceUrl: result.article.sourceUrl,
+      reasons: result.reasons,
+    }));
+  const stats = await queue.getStats();
 
   return {
     run,
-    candidates: accepted,
+    candidates,
     diagnostics: {
       feedCount: sources.length,
       entriesFound: entries.length,
-      entriesReviewed: reviewed.length,
-      articlesRead,
-      accepted: accepted.length,
+      entriesQueued: enqueued.created,
+      entriesAlreadyKnown: enqueued.alreadyKnown,
+      entriesReviewed: claimed.length,
+      articlesRead: processingResults.filter((result) => result.articleRead)
+        .length,
+      accepted: candidates.length,
+      failed: failedResults.length,
+      retried: failedResults.filter((result) => result.queueStatus === "retry")
+        .length,
+      deadLettered: failedResults.filter(
+        (result) => result.queueStatus === "dead-letter",
+      ).length,
+      deadLettersRequeued,
+      autoApproval: { enabled: env.NEWS_AUTO_APPROVE, ...autoApproval },
       rejected,
+      queue: stats,
     },
   };
 }

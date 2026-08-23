@@ -1,9 +1,13 @@
-import "@fontsource-variable/onest";
-import "@fontsource-variable/unbounded";
-import "@fontsource/ibm-plex-mono/400.css";
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
+import { Montserrat } from "next/font/google";
 
 import "./globals.css";
+
+const montserrat = Montserrat({
+  subsets: ["cyrillic", "latin"],
+  display: "swap",
+  variable: "--font-montserrat",
+});
 
 export const metadata: Metadata = {
   title: {
@@ -14,6 +18,11 @@ export const metadata: Metadata = {
     "Персональные сигналы рынка для поставщиков и закупщиков розничных сетей.",
 };
 
+export const viewport: Viewport = {
+  colorScheme: "light",
+  themeColor: "#ffffff",
+};
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -21,7 +30,12 @@ export default function RootLayout({
 }>) {
   return (
     <html data-scroll-behavior="smooth" lang="ru">
-      <body>{children}</body>
+      <body className={montserrat.variable}>
+        <a className="skip-link" href="#main-content">
+          К основному содержанию
+        </a>
+        {children}
+      </body>
     </html>
   );
 }

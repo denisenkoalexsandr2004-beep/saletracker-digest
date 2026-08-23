@@ -49,7 +49,7 @@ export default async function ArticlePage({ params }: ArticlePageProps) {
   return (
     <>
       <SiteHeader />
-      <main className="article">
+      <main className="article" id="main-content">
         <Link className="article-back" href="/preview">
           ← Вернуться к выпуску
         </Link>

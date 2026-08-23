@@ -6,6 +6,7 @@ import {
   createDigestGreeting,
   dispatchDigestDelivery,
   ensureDigestDelivery,
+  listDigestDeliveryViews,
   markDigestDeliveryReady,
 } from "@/features/deliveries/digest-delivery.service";
 import { InMemorySubscriptionRepository } from "@/features/subscriptions/subscription.repository";
@@ -124,6 +125,28 @@ describe("digest delivery", () => {
     );
 
     expect(ready.status).toBe("ready");
+    expect(fixture.deliveries.list()).toHaveLength(1);
+    expect(ready.id).toBe(fixture.delivery.id);
+  });
+
+  it("показывает только последний выпуск при исторических дублях", async () => {
+    const fixture = await buildFixture();
+    const duplicate = fixture.deliveries.create({
+      ...fixture.delivery,
+      id: "delivery_connected_duplicate",
+      issueKey: `${fixture.subscription.id}:connected:legacy`,
+      createdAt: "2026-07-24T12:10:00+03:00",
+      updatedAt: "2026-07-24T12:10:00+03:00",
+    });
+
+    const views = await listDigestDeliveryViews(
+      20,
+      fixture.subscriptions,
+      fixture.deliveries,
+    );
+
+    expect(views).toHaveLength(1);
+    expect(views[0]?.id).toBe(duplicate.id);
   });
 
   it("не отправляет устаревшие демоматериалы как свежий выпуск", async () => {

@@ -9,6 +9,7 @@ import { AdminConsole } from "@/features/admin/components/admin-console";
 import {
   getNewsCandidateRepository,
 } from "@/features/news-ingestion/news-candidate.repository";
+import { getNewsAiUsageRepository } from "@/features/news-ingestion/news-ai-usage.repository";
 import { getNewsAgentConfiguration } from "@/features/news-ingestion/openai-news-agent";
 import { newsSourceRegistry } from "@/features/news-sources/news-source.registry";
 import { getMaterialRepository } from "@/features/materials/material.repository";
@@ -27,16 +28,18 @@ export const metadata: Metadata = {
 export default async function AdminPage() {
   await requireAdminPage();
   await synchronizeDigestDeliveries();
-  const [deliveries, candidates, materials] = await Promise.all([
+  const [deliveries, candidates, materials, aiUsage] = await Promise.all([
     listDigestDeliveryViews(20),
     getNewsCandidateRepository().listCandidates(),
     getMaterialRepository().list(),
+    getNewsAiUsageRepository().getSummary(),
   ]);
 
   return (
     <AdminConsole
       agentConfiguration={getNewsAgentConfiguration()}
       initialCandidates={candidates}
+      initialAiUsage={aiUsage}
       initialMaterials={materials}
       initialDeliveries={deliveries}
       events={demoEvents}

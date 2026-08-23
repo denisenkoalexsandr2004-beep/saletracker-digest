@@ -4,6 +4,7 @@ import {
   useDeferredValue,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 
@@ -42,6 +43,7 @@ const MAX_SELECTED_CATEGORIES = 20;
 export function SubscriptionBuilder({
   availableTags,
 }: SubscriptionBuilderProps) {
+  const formRef = useRef<HTMLFormElement>(null);
   const [role, setRole] = useState<SubscriberRole>("supplier");
   const [tags, setTags] = useState<string[]>([
     "Молочная продукция",
@@ -202,11 +204,15 @@ export function SubscriptionBuilder({
       const body = await response.json();
 
       if (!response.ok) {
-        setFieldErrors(
-          body.fields ?? {
-            form: body.detail ?? "Не удалось сохранить настройки.",
-          },
-        );
+        const nextErrors = body.fields ?? {
+          form: body.detail ?? "Не удалось сохранить настройки.",
+        };
+        setFieldErrors(nextErrors);
+        requestAnimationFrame(() => {
+          formRef.current
+            ?.querySelector<HTMLElement>("[aria-invalid='true']")
+            ?.focus();
+        });
         return;
       }
 
@@ -230,8 +236,9 @@ export function SubscriptionBuilder({
   return (
     <form
       className="subscription-builder digest-builder"
-      onSubmit={handleSubmit}
       noValidate
+      onSubmit={handleSubmit}
+      ref={formRef}
     >
       <div className="builder-step">
         <div className="builder-step__heading">
@@ -278,7 +285,10 @@ export function SubscriptionBuilder({
           </span>
           <span className="sr-only">Поиск по категориям</span>
           <input
+            aria-describedby={fieldErrors.tags ? "tags-error" : undefined}
+            aria-invalid={Boolean(fieldErrors.tags)}
             autoComplete="off"
+            name="categorySearch"
             onChange={(event) => setCategoryQuery(event.target.value)}
             placeholder="Найти категорию: напитки, логистика, косметика…"
             type="search"
@@ -288,7 +298,12 @@ export function SubscriptionBuilder({
             {matchingTags.length}
           </span>
         </label>
-        <div className="tag-list" aria-label="Интересы">
+        <div
+          aria-describedby={fieldErrors.tags ? "tags-error" : undefined}
+          aria-label="Интересы"
+          className="tag-list"
+          role="group"
+        >
           {visibleTags.map((tag) => (
             <button
               aria-pressed={tags.includes(tag)}
@@ -319,7 +334,7 @@ export function SubscriptionBuilder({
           </button>
         ) : null}
         {fieldErrors.tags ? (
-          <p className="field-error" role="alert">
+          <p className="field-error" id="tags-error" role="alert">
             {fieldErrors.tags}
           </p>
         ) : null}
@@ -390,45 +405,61 @@ export function SubscriptionBuilder({
           <label>
             <span>Имя</span>
             <input
+              aria-describedby={fieldErrors.name ? "name-error" : undefined}
+              aria-invalid={Boolean(fieldErrors.name)}
               autoComplete="name"
               name="name"
               onChange={(event) => updateField("name", event.target.value)}
               value={fields.name}
             />
             {fieldErrors.name ? (
-              <small className="field-error">{fieldErrors.name}</small>
+              <small className="field-error" id="name-error">
+                {fieldErrors.name}
+              </small>
             ) : null}
           </label>
           <label>
             <span>Компания</span>
             <input
+              aria-describedby={fieldErrors.company ? "company-error" : undefined}
+              aria-invalid={Boolean(fieldErrors.company)}
               autoComplete="organization"
               name="company"
               onChange={(event) => updateField("company", event.target.value)}
               value={fields.company}
             />
             {fieldErrors.company ? (
-              <small className="field-error">{fieldErrors.company}</small>
+              <small className="field-error" id="company-error">
+                {fieldErrors.company}
+              </small>
             ) : null}
           </label>
           <label className="contact-grid__wide">
             <span>Рабочий email</span>
             <input
+              aria-describedby={fieldErrors.email ? "email-error" : undefined}
+              aria-invalid={Boolean(fieldErrors.email)}
               autoComplete="email"
               inputMode="email"
               name="email"
               onChange={(event) => updateField("email", event.target.value)}
+              spellCheck={false}
               type="email"
               value={fields.email}
             />
             {fieldErrors.email ? (
-              <small className="field-error">{fieldErrors.email}</small>
+              <small className="field-error" id="email-error">
+                {fieldErrors.email}
+              </small>
             ) : null}
           </label>
         </div>
         <label className="consent">
           <input
+            aria-describedby={fieldErrors.consent ? "consent-error" : undefined}
+            aria-invalid={Boolean(fieldErrors.consent)}
             checked={consent}
+            name="consent"
             onChange={(event) => {
               setConsent(event.target.checked);
               setFieldErrors((current) => ({ ...current, consent: "" }));
@@ -441,7 +472,7 @@ export function SubscriptionBuilder({
           </span>
         </label>
         {fieldErrors.consent ? (
-          <p className="field-error" role="alert">
+          <p className="field-error" id="consent-error" role="alert">
             {fieldErrors.consent}
           </p>
         ) : null}

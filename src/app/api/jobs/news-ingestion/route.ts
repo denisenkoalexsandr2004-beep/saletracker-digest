@@ -8,7 +8,7 @@ import { isDatabaseConfigured } from "@/shared/database/client";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 export async function POST(request: Request) {
   const unauthorized = requireCronRequest(request);
@@ -44,6 +44,15 @@ export async function POST(request: Request) {
           runId: ingestion.run.id,
           candidateCount: ingestion.candidates.length,
           entriesFound: ingestion.diagnostics.entriesFound,
+          entriesQueued: ingestion.diagnostics.entriesQueued,
+          entriesProcessed: ingestion.diagnostics.entriesReviewed,
+          retryCount: ingestion.diagnostics.retried,
+          deadLettersRequeued: ingestion.diagnostics.deadLettersRequeued,
+          deadLetterCount: ingestion.diagnostics.queue.deadLetter,
+          queuePending: ingestion.diagnostics.queue.pending,
+          autoApproved: ingestion.diagnostics.autoApproval.approved,
+          autoApprovalFailures:
+            ingestion.diagnostics.autoApproval.failed.length,
         };
       },
     });

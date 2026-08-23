@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0",
+  "repo": "/Users/aleksandr/Digest ",
+  "status": "analyzed",
+  "task_family": "news-source-coverage-audit",
+  "analysis_mode": "read-only-manual-adaptation",
+  "entrypoints": [
+    "src/app/api/jobs/news-ingestion/route.ts",
+    "src/features/news-ingestion/rss-ingestion.ts",
+    "src/features/news-ingestion/openai-news-agent.ts"
+  ],
+  "task_relevant_files": [
+    "src/features/subscriptions/subscription.categories.ts",
+    "src/features/news-sources/news-source.registry.ts",
+    "src/features/news-sources/news-source.types.ts",
+    "src/features/news-ingestion/rss-feed.ts",
+    "src/features/news-ingestion/rss-ingestion.ts",
+    "src/features/news-ingestion/news-article-queue.repository.ts",
+    "src/features/digests/digest.service.ts"
+  ],
+  "research_map": "analysis_outputs/RESEARCH_MAP.md",
+  "change_map": "analysis_outputs/CHANGE_MAP.md",
+  "eval_contract": "analysis_outputs/EVAL_CONTRACT.md",
+  "suspicious_patterns": [
+    "web-search registry entries are not consumed by the autonomous RSS-only job",
+    "feed fetch failures are converted to empty results without per-source health state",
+    "source topics are descriptive and are not an enforced source-to-tag routing contract",
+    "newest-first bounded processing can starve older queue entries under sustained overload"
+  ],
+  "conservative_suggestions": [
+    "enable verified RSS feeds in small measured waves",
+    "add per-source observability before broad expansion",
+    "treat scheduled web-search as a separate product and cost decision",
+    "measure category coverage rather than registry size"
+  ],
+  "outputs": {
+    "summary": "analysis_outputs/SUMMARY.md",
+    "risks": "analysis_outputs/RISKS.md",
+    "research_map": "analysis_outputs/RESEARCH_MAP.md",
+    "change_map": "analysis_outputs/CHANGE_MAP.md",
+    "eval_contract": "analysis_outputs/EVAL_CONTRACT.md",
+    "status": "analysis_outputs/status.json",
+    "source_research": "docs/FMCG-SOURCE-RESEARCH.md"
+  }
+}

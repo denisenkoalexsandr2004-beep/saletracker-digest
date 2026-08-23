@@ -18,7 +18,7 @@ export default async function AdminLoginPage() {
   }
 
   return (
-    <main className="admin-login-shell">
+    <main className="admin-login-shell" id="main-content">
       <AdminLoginForm configured={isAdminAuthConfigured()} />
     </main>
   );

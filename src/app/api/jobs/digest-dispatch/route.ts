@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { requireCronRequest } from "@/features/jobs/cron-auth";
 import {
+  getDigestDispatchRunKey,
   getMoscowSlot,
   isDigestDispatchWindow,
   runScheduledDigestDispatch,
@@ -63,12 +64,18 @@ export async function POST(request: Request) {
   try {
     const result = await runIdempotentJob({
       kind: "digest-dispatch",
-      idempotencyKey: `digest-dispatch:${slot.date}`,
-      payload: { slot: slot.date, timezone: "Europe/Moscow" },
+      idempotencyKey: getDigestDispatchRunKey(slot),
+      payload: {
+        slot: slot.date,
+        hour: slot.hour,
+        minute: slot.minute,
+        timezone: "Europe/Moscow",
+      },
       execute: async () =>
         runScheduledDigestDispatch(now, {
           gateway: client,
           appUrl: env.APP_URL,
+          batchSize: env.DIGEST_DISPATCH_BATCH_SIZE,
           materials: await getMaterialRepository().listApproved(),
         }),
     });

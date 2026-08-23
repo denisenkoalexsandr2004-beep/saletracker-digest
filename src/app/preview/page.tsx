@@ -33,7 +33,7 @@ export default function PreviewPage() {
   return (
     <div className="subpage">
       <SiteHeader />
-      <main>
+      <main id="main-content">
         <header className="subpage-head">
           <p className="section-kicker">Демонстрационный выпуск</p>
           <h1>Так дайджест приходит в Telegram</h1>

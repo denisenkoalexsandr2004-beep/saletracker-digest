@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 
@@ -13,6 +14,7 @@ import type {
   MaterialStatus,
 } from "@/features/digests/digest.types";
 import type { NewsCandidate } from "@/features/news-ingestion/news-candidate.types";
+import type { NewsAiUsageSummary } from "@/features/news-ingestion/news-ai-usage.types";
 import type { NewsSource } from "@/features/news-sources/news-source.types";
 import {
   frequencyLabels,
@@ -20,12 +22,16 @@ import {
 } from "@/features/subscriptions/subscription.types";
 
 interface AdminConsoleProps {
+  initialAiUsage: NewsAiUsageSummary;
   initialMaterials: Material[];
   initialDeliveries: DigestDeliveryView[];
   initialCandidates: NewsCandidate[];
   sources: NewsSource[];
   agentConfiguration: {
+    provider: "openai" | "perplexity";
+    providerLabel: "OpenAI" | "Perplexity";
     configured: boolean;
+    credentialName: "OPENAI_API_KEY" | "PERPLEXITY_API_KEY";
     model: string;
     enabledSourceCount: number;
     totalSourceCount: number;
@@ -80,12 +86,25 @@ interface IngestionResponse {
     diagnostics?: {
       accepted: number;
       entriesFound?: number;
+      entriesQueued?: number;
       entriesReviewed?: number;
+      failed?: number;
+      retried?: number;
+      deadLettered?: number;
+      queue?: {
+        pending: number;
+        retry: number;
+        deadLetter: number;
+      };
       rejected: Array<{ sourceUrl: string; reasons: string[] }>;
     };
   };
   detail?: string;
   message?: string;
+}
+
+interface AiUsageResponse {
+  data?: NewsAiUsageSummary;
 }
 
 interface MaterialMutationResponse {
@@ -103,7 +122,26 @@ function formatAdminTime(value: string): string {
   }).format(new Date(value));
 }
 
+function formatTokenCount(value: number): string {
+  return new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(
+    value,
+  );
+}
+
+function formatUsdMicros(value: number): string {
+  const dollars = value / 1_000_000;
+  const maximumFractionDigits = dollars < 0.01 ? 5 : 2;
+
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits,
+  }).format(dollars);
+}
+
 export function AdminConsole({
+  initialAiUsage,
   initialMaterials,
   initialDeliveries,
   initialCandidates,
@@ -111,6 +149,7 @@ export function AdminConsole({
   agentConfiguration,
   events,
 }: AdminConsoleProps) {
+  const [aiUsage, setAiUsage] = useState(initialAiUsage);
   const [materials, setMaterials] = useState(initialMaterials);
   const [deliveries, setDeliveries] = useState(initialDeliveries);
   const [candidates, setCandidates] = useState(initialCandidates);
@@ -432,15 +471,19 @@ export function AdminConsole({
     setIsCollecting(true);
     setQueueNotice(null);
 
-    // Ленты отдают все публикации за период, но разбор идёт порциями: каждая
-    // укладывается в лимит времени функции, а вместе они проходят весь поток.
+    // Первый вызов сохраняет свежие ссылки, следующие только выгребают очередь.
+    // Ошибка одной статьи не откатывает и не повторяет соседние.
     const batches = 3;
-    const batchSize = 25;
     const collected: NewsCandidate[] = [];
     const failures: string[] = [];
     const rejectionReasons = new Set<string>();
     let entriesFound = 0;
+    let entriesQueued = 0;
     let entriesReviewed = 0;
+    let processingFailures = 0;
+    let queuePending = 0;
+    let queueRetries = 0;
+    let queueDeadLetter = 0;
 
     try {
       for (let batch = 0; batch < batches; batch += 1) {
@@ -454,7 +497,7 @@ export function AdminConsole({
               mode: "feeds",
               days: 5,
               maxCandidates: 12,
-              entryOffset: batch * batchSize,
+              discover: batch === 0,
             }),
           });
           const body = (await response.json()) as IngestionResponse;
@@ -468,22 +511,31 @@ export function AdminConsole({
             entriesFound,
             body.data.diagnostics?.entriesFound ?? 0,
           );
+          entriesQueued += body.data.diagnostics?.entriesQueued ?? 0;
           entriesReviewed += body.data.diagnostics?.entriesReviewed ?? 0;
+          processingFailures += body.data.diagnostics?.failed ?? 0;
+          queuePending = body.data.diagnostics?.queue?.pending ?? queuePending;
+          queueRetries = body.data.diagnostics?.queue?.retry ?? queueRetries;
+          queueDeadLetter =
+            body.data.diagnostics?.queue?.deadLetter ?? queueDeadLetter;
           for (const item of body.data.diagnostics?.rejected ?? []) {
             for (const reason of item.reasons) {
               rejectionReasons.add(reason);
             }
           }
 
-          // Порция пришла пустой — значит свежие публикации кончились.
+          // Порция пустая — готовых к обработке задач сейчас не осталось.
           if (!body.data.diagnostics?.entriesReviewed) {
             break;
           }
         } catch (error) {
-          // Сбой одной порции не должен прерывать разбор остальных.
+          // Внутри порции статьи уже изолированы друг от друга. Ошибка всего
+          // HTTP-вызова означает системный сбой, поэтому провайдера не долбим
+          // ещё двумя заведомо неуспешными пачками.
           failures.push(
             error instanceof Error ? error.message : "неизвестная ошибка",
           );
+          break;
         }
       }
 
@@ -500,14 +552,36 @@ export function AdminConsole({
       const failureNote = failures.length
         ? ` Порций с ошибкой: ${failures.length} (${failures[0]}).`
         : "";
+      const retryNote = processingFailures
+        ? ` Ошибок отдельных статей: ${processingFailures}; ожидают повтора: ${queueRetries}.`
+        : "";
+      const deadLetterNote = queueDeadLetter
+        ? ` Требуют разбора вручную: ${queueDeadLetter}.`
+        : "";
 
       setQueueNotice({
-        type: collected.length && !failures.length ? "success" : "error",
+        type:
+          !failures.length && !processingFailures && !queueDeadLetter
+            ? "success"
+            : "error",
         text: collected.length
-          ? `Публикаций в лентах: ${entriesFound}, разобрано ${entriesReviewed}. Собрано кандидатов: ${collected.length}.${failureNote}`
-          : `Разобрано публикаций: ${entriesReviewed}, ни одна не прошла проверку.${rejectionReasons.size ? ` Причины: ${[...rejectionReasons].join(", ")}.` : ""}${failureNote}`,
+          ? `Публикаций в лентах: ${entriesFound}, новых в очереди: ${entriesQueued}, обработано: ${entriesReviewed}. Собрано кандидатов: ${collected.length}. Осталось: ${queuePending}.${retryNote}${deadLetterNote}${failureNote}`
+          : `Новых в очереди: ${entriesQueued}, обработано: ${entriesReviewed}, кандидатов нет.${rejectionReasons.size ? ` Причины: ${[...rejectionReasons].join(", ")}.` : ""}${retryNote}${deadLetterNote}${failureNote}`,
       });
     } finally {
+      try {
+        const response = await fetch("/api/admin/ai-usage", {
+          cache: "no-store",
+        });
+        const body = (await response.json()) as AiUsageResponse;
+
+        if (response.ok && body.data) {
+          setAiUsage(body.data);
+        }
+      } catch {
+        // Сбор уже завершён; недоступность счётчика не отменяет его результат.
+      }
+
       setCollectProgress(null);
       setIsCollecting(false);
     }
@@ -521,9 +595,15 @@ export function AdminConsole({
   return (
     <div className="admin-shell">
       <header className="admin-header">
-        <Link className="brand" href="/">
-          <span className="brand-mark">ST</span>
-          <span>SaleTracker / Редакция</span>
+        <Link className="brand" href="/" aria-label="Сейл Трекер — главная">
+          <Image
+            alt="Сейл Трекер"
+            height={40}
+            priority
+            src="/brand/saletracker-logo.svg"
+            width={194}
+          />
+          <span className="brand-product">Редакция</span>
         </Link>
         <div className="admin-user">
           <i aria-hidden="true" />
@@ -534,16 +614,16 @@ export function AdminConsole({
         </div>
       </header>
 
-      <main className="admin-main">
+      <main className="admin-main" id="main-content">
         <div className="admin-title-row">
           <div>
-            <p className="section-kicker">Пятница, 24 июля</p>
+            <p className="section-kicker">Редакторский контур</p>
             <h1>Пульт выпусков</h1>
             <p>До закрытия набора на ближайший выпуск · 47 минут</p>
           </div>
-          <a className="button button-signal" href="/preview">
+          <Link className="button button-signal" href="/preview">
             Проверить Telegram-выпуск ↗
-          </a>
+          </Link>
         </div>
 
         <section className="admin-kpis" aria-label="Сводные показатели">
@@ -855,10 +935,12 @@ export function AdminConsole({
                                             checked={draftItemIds.includes(
                                               material.id,
                                             )}
+                                            name="draftMaterialIds"
                                             onChange={() =>
                                               toggleDraftItem(material.id)
                                             }
                                             type="checkbox"
+                                            value={material.id}
                                           />
                                           <span>
                                             <strong>{material.title}</strong>
@@ -917,14 +999,17 @@ export function AdminConsole({
               <div className="material-filters">
                 <input
                   aria-label="Поиск по заголовку и тексту"
+                  autoComplete="off"
                   className="material-filter-search"
+                  name="materialSearch"
                   onChange={(event) => setMaterialSearch(event.target.value)}
-                  placeholder="Поиск по заголовку или тексту"
+                  placeholder="Поиск по заголовку или тексту…"
                   type="search"
                   value={materialSearch}
                 />
                 <select
                   aria-label="Фильтр по теме"
+                  name="materialTag"
                   onChange={(event) => setMaterialTag(event.target.value)}
                   value={materialTag}
                 >
@@ -937,6 +1022,7 @@ export function AdminConsole({
                 </select>
                 <select
                   aria-label="Фильтр по источнику"
+                  name="materialSource"
                   onChange={(event) => setMaterialSource(event.target.value)}
                   value={materialSource}
                 >
@@ -1093,8 +1179,8 @@ export function AdminConsole({
                   }
                 >
                   {agentConfiguration.configured
-                    ? "API подключён"
-                    : "Нужен OPENAI_API_KEY"}
+                    ? `${agentConfiguration.providerLabel} API подключён`
+                    : `Нужен ${agentConfiguration.credentialName}`}
                 </span>
                 <strong>{agentConfiguration.model}</strong>
                 <small>
@@ -1113,6 +1199,46 @@ export function AdminConsole({
                     : "Собрать новости из лент"}
                 </button>
               </div>
+            </section>
+
+            <section className="admin-panel ai-usage-panel">
+              <div className="admin-panel-head">
+                <div>
+                  <p className="mono-label">Фактический usage API</p>
+                  <h2>Токены и стоимость AI-обработки</h2>
+                </div>
+                <span>обновлено {formatAdminTime(aiUsage.generatedAt)}</span>
+              </div>
+              <div className="ai-usage-grid">
+                <article>
+                  <span>Стоимость · 24 часа</span>
+                  <strong>
+                    {formatUsdMicros(aiUsage.last24Hours.costUsdMicros)}
+                  </strong>
+                </article>
+                <article>
+                  <span>Токены · 24 часа</span>
+                  <strong>
+                    {formatTokenCount(aiUsage.last24Hours.totalTokens)}
+                  </strong>
+                </article>
+                <article>
+                  <span>Ответы AI · 24 часа</span>
+                  <strong>{aiUsage.last24Hours.requestCount}</strong>
+                </article>
+                <article>
+                  <span>Стоимость · всё время</span>
+                  <strong>{formatUsdMicros(aiUsage.allTime.costUsdMicros)}</strong>
+                </article>
+              </div>
+              <p className="panel-note">
+                Учитываются все успешные ответы провайдера: принятые,
+                отфильтрованные и повторные попытки. История начинается с
+                момента установки счётчика.
+                {aiUsage.allTime.unpricedRequestCount
+                  ? ` Без цены от провайдера: ${aiUsage.allTime.unpricedRequestCount}.`
+                  : ""}
+              </p>
             </section>
 
             <section className="admin-panel candidate-panel">
