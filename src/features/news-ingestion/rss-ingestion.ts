@@ -504,6 +504,22 @@ export async function runFeedIngestion(input: FeedIngestionInput): Promise<{
 
   const enqueued = await queue.enqueue(entries, startedAt);
   const provider = getNewsAiProviderConfiguration();
+  const candidateRepository = getNewsCandidateRepository();
+  // Promotion is intentionally before the provider call: a quota or network
+  // outage must not block candidates that were already enriched and verified
+  // by an earlier run.
+  const backlogAutoApproval = env.NEWS_AUTO_APPROVE
+    ? await autoApproveNewsCandidates(
+        await candidateRepository.listCandidates(100),
+        env.NEWS_AUTO_APPROVE_MIN_CONFIDENCE,
+        { candidates: candidateRepository },
+      )
+    : {
+        eligible: 0,
+        approved: 0,
+        skipped: 0,
+        failed: [],
+      };
 
   if (!provider.configured) {
     throw new NewsAgentError(
@@ -558,11 +574,10 @@ export async function runFeedIngestion(input: FeedIngestionInput): Promise<{
 
   // Persist candidates before acknowledging queue rows. A failed transaction
   // leaves leases to expire, making the same work safely retryable.
-  const candidateRepository = getNewsCandidateRepository();
   await candidateRepository.saveRun(run, candidates);
-  const autoApproval = env.NEWS_AUTO_APPROVE
+  const currentAutoApproval = env.NEWS_AUTO_APPROVE
     ? await autoApproveNewsCandidates(
-        await candidateRepository.listCandidates(100),
+        candidates,
         env.NEWS_AUTO_APPROVE_MIN_CONFIDENCE,
         { candidates: candidateRepository },
       )
@@ -572,6 +587,17 @@ export async function runFeedIngestion(input: FeedIngestionInput): Promise<{
         skipped: candidates.length,
         failed: [],
       };
+  const autoApproval: NewsAutoApprovalResult = {
+    eligible:
+      backlogAutoApproval.eligible + currentAutoApproval.eligible,
+    approved:
+      backlogAutoApproval.approved + currentAutoApproval.approved,
+    skipped: backlogAutoApproval.skipped + currentAutoApproval.skipped,
+    failed: [
+      ...backlogAutoApproval.failed,
+      ...currentAutoApproval.failed,
+    ],
+  };
   await Promise.all(
     acceptedResults.map((result) =>
       queue.markProcessed(result.article.id, new Date().toISOString()),
